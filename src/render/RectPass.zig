@@ -15,7 +15,7 @@ pipeline: *gpu.RenderPipeline,
 vertex_buffer: GPUBuffer,
 index_buffer: GPUBuffer,
 
-const Vertex = extern struct {
+const Vertex = packed struct {
     position: geo.Vec2,
     normal: geo.Vec2,
     color: geo.Vec4,
@@ -53,7 +53,18 @@ pub fn init() Self {
     defer shader_module.release();
 
     // Fragment state
-    const blend = gpu.BlendState{};
+    const blend = gpu.BlendState{
+        .color = .{
+            .operation = .add,
+            .src_factor = .src_alpha,
+            .dst_factor = .one_minus_src_alpha,
+        },
+        .alpha = .{
+            .operation = .add,
+            .src_factor = .one,
+            .dst_factor = .one_minus_src_alpha,
+        },
+    };
     const color_target = gpu.ColorTargetState{
         .format = core.descriptor.format,
         .blend = &blend,
@@ -91,11 +102,21 @@ pub fn init() Self {
     };
 }
 
-pub fn render(
+pub fn deinit(self: *Self) void {
+    self.pipeline.release();
+    self.vertex_buffer.buffer.release();
+    self.index_buffer.buffer.release();
+
+    self.* = undefined;
+}
+
+pub fn draw(
     self: *Self,
     output: *gpu.Texture,
     rects: []const geo.Rect,
 ) void {
+    @setFloatMode(.Optimized);
+
     const output_view = output.createView(&.{
         .label = "rect_pass_output_view",
     });
@@ -233,6 +254,9 @@ fn writeRectRounded(
     const smooth_steps: u16 = 10;
     const fsmooth_steps = @as(f32, @floatFromInt(smooth_steps));
 
+    var transparent = rect.color * @as(geo.Vec4, @splat(rect.color[3]));
+    transparent[3] = 0;
+
     // center point
     try vb.writeStruct(Vertex{
         .position = win_dims.normalize(
@@ -309,7 +333,7 @@ fn writeRectRounded(
             try vb.writeStruct(Vertex{
                 .position = win_dims.normalize(pos),
                 .normal = win_dims.normalize_delta(normal),
-                .color = .{ 0, 0, 0, 0 },
+                .color = transparent,
             });
         }
     }

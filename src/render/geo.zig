@@ -28,7 +28,7 @@ pub const Rect = struct {
     color: Vec4,
     radius: Rect.Radius = .{},
 
-    const Radius = struct {
+    pub const Radius = struct {
         top_left: Vec2 = @as(Vec2, @splat(0)),
         top_right: Vec2 = @as(Vec2, @splat(0)),
         bottom_right: Vec2 = @as(Vec2, @splat(0)),
@@ -44,7 +44,7 @@ pub const Rect = struct {
         }
     };
 
-    pub fn uniform_radius(radius: f32) Rect.Radius {
+    pub fn uniformRadius(radius: f32) Rect.Radius {
         return .{
             .top_left = @as(Vec2, @splat(radius)),
             .top_right = @as(Vec2, @splat(radius)),
