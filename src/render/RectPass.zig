@@ -250,11 +250,11 @@ fn writeRectRounded(
     rect: geo.Rect,
 ) !u16 {
     _ = self;
+    // approximate (lower-bound) vertices per pixel-length along arc-path.
+    // a + b > circumference(a, b) / 4
+    const smoothness: f32 = 0.3;
 
-    const smooth_steps: u16 = 10;
-    const fsmooth_steps = @as(f32, @floatFromInt(smooth_steps));
-
-    var transparent = rect.color * @as(geo.Vec4, @splat(rect.color[3]));
+    var transparent = rect.color;
     transparent[3] = 0;
 
     // center point
@@ -266,58 +266,90 @@ fn writeRectRounded(
         .color = rect.color,
     });
 
-    const corner_radii = .{
+    var corner_radii: [4]geo.Vec2 = .{
         rect.radius.top_left,
         rect.radius.top_right,
         rect.radius.bottom_right,
         rect.radius.bottom_left,
     };
+    var arc_vertex_count: [4]u16 = undefined;
+    for (&corner_radii, &arc_vertex_count) |*rad, *vertex_count| {
+        const smooth_corner =
+            @reduce(.And, rad.* >= @as(geo.Vec2, @splat(0.5)));
+        if (!smooth_corner) {
+            rad.* = @splat(0);
+        }
+
+        vertex_count.* = @max(
+            @as(u16, @intFromFloat(@reduce(.Add, rad.*) * smoothness)),
+            1,
+        );
+    }
+
     const arc_origins = .{
         // top left
-        rect.origin + rect.radius.top_left,
+        rect.origin + corner_radii[0],
 
         // top right
         rect.origin + geo.Vec2{
-            rect.size[0] - rect.radius.top_right[0],
-            rect.radius.top_right[1],
+            rect.size[0] - corner_radii[1][0],
+            corner_radii[1][1],
         },
 
         // bottom right
-        rect.origin + rect.size - rect.radius.bottom_right,
+        rect.origin + rect.size - corner_radii[2],
 
         // bottom left
         rect.origin + geo.Vec2{
-            rect.radius.bottom_left[0],
-            rect.size[1] - rect.radius.bottom_left[1],
+            corner_radii[3][0],
+            rect.size[1] - corner_radii[3][1],
         },
     };
 
     const V = struct {
         base_idx: u16,
-        corner_v_count: u16,
+        corner_v_count: [4]u16,
+        corner_v_count_total: u16,
 
         const Slot = enum(u8) { inner = 0, outer = 1 };
         const vert_per_point: u16 = std.meta.fields(Slot).len;
 
         fn idx(v: @This(), slot: Slot, i: u16) u16 {
             const base = v.base_idx + @intFromEnum(slot);
-            return base + (i % (v.corner_v_count * 4)) * vert_per_point;
+            return base + (i % v.corner_v_count_total) * vert_per_point;
         }
     };
     const v = V{
         .base_idx = v_idx + 1,
-        .corner_v_count = smooth_steps + 1,
+        .corner_v_count = arc_vertex_count,
+        .corner_v_count_total = @reduce(
+            .Add,
+            @as(@Vector(4, u16), arc_vertex_count),
+        ),
     };
 
-    inline for (arc_origins, corner_radii, 0..) |arc_origin, radius, _c| {
+    inline for (
+        arc_origins,
+        corner_radii,
+        v.corner_v_count,
+        0..,
+    ) |arc_origin, radius, v_count, _c| {
         const corner = @as(u16, @intCast(_c));
         const fcorner = @as(f32, @floatFromInt(corner));
 
-        for (0..smooth_steps + 1) |_s| {
+        for (0..v_count) |_s| {
             const step = @as(u16, @intCast(_s));
             const fstep = @as(f32, @floatFromInt(step));
+            const fvcount = @as(f32, @floatFromInt(v_count));
 
-            const t = ((fstep / fsmooth_steps) + fcorner) * (0.5 * std.math.pi);
+            // Avoid division by zero.
+            // (theta)
+            const t = if (v_count == 1) ( //
+                0 //
+            ) else ( //
+                ((fstep / (fvcount - 1)) + fcorner) * (0.5 * std.math.pi) //
+            );
+
             const normal = geo.Vec2{
                 -std.math.cos(t),
                 -std.math.sin(t),
@@ -338,13 +370,16 @@ fn writeRectRounded(
         }
     }
 
-    for (0..(4 * v.corner_v_count)) |_i| {
+    for (0..v.corner_v_count_total) |_i| {
         const i = @as(u16, @intCast(_i));
 
+        // inner rounded corner to center
         try ib.writeIntNative(u16, v_idx);
         try ib.writeIntNative(u16, v.idx(.inner, i));
         try ib.writeIntNative(u16, v.idx(.inner, i + 1));
 
+        // outer rounded corner to inner rounded corner
+        //
         // quad(outer.i, outer.i + 1, inner.i + 1, inner.i)
         try ib.writeIntNative(u16, v.idx(.outer, i));
         try ib.writeIntNative(u16, v.idx(.outer, i + 1));
@@ -354,5 +389,5 @@ fn writeRectRounded(
         try ib.writeIntNative(u16, v.idx(.inner, i + 1));
     }
 
-    return v.corner_v_count * 2 * 4 + 1;
+    return v.corner_v_count_total * 2 + 1;
 }

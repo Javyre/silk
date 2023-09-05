@@ -98,10 +98,7 @@ pub fn update(app: *App) !bool {
         .origin = .{ spring_x_pos, spring_y_pos },
         .size = .{ 100, 100 },
         .color = .{
-            246.0 / 255.0,
-            71.0 / 255.0,
-            64.0 / 255.0,
-            0.7,
+            1, 1, 1, 0.7,
         },
         .radius = geo.Rect.uniformRadius(17.0),
     });
@@ -109,10 +106,7 @@ pub fn update(app: *App) !bool {
         .origin = .{ 400, 400 },
         .size = .{ 300, 600 },
         .color = .{
-            246.0 / 255.0,
-            71.0 / 255.0,
-            64.0 / 255.0,
-            1.0,
+            0, 0.2, 0.5, 0.7,
         },
         .radius = geo.Rect.uniformRadius(17.0),
     });
