@@ -1,5 +1,9 @@
 const std = @import("std");
 
+comptime {
+    @setFloatMode(.Optimized);
+}
+
 const Self = @This();
 
 init_time: std.time.Instant,
@@ -18,7 +22,18 @@ const BatchVec = @Vector(BATCH_SIZE, f32);
 const UnderDampedSpringBatches = std.MultiArrayList(UnderDampedSpring(BatchVec));
 const OverDampedSpringBatches = std.MultiArrayList(OverDampedSpring(BatchVec));
 
-fn UnderDampedSpring(comptime T: type) type {
+fn MergeFields(comptime T1: type, comptime T2: type) type {
+    return @Type(.{
+        .Struct = .{
+            .layout = .Auto,
+            .fields = std.meta.fields(T1) ++ std.meta.fields(T2),
+            .decls = &.{},
+            .is_tuple = false,
+        },
+    });
+}
+
+fn BaseSpring(comptime T: type) type {
     return struct {
         // equilibrium is always at 0 but we then add target_value to the result
         target_value: T,
@@ -30,9 +45,9 @@ fn UnderDampedSpring(comptime T: type) type {
 
         // initial distance from equilibrium
         x0: T,
-        // initial velocity
+        // initial velocity (units/s)
         v0: T,
-        // natural oscillation frequency squared
+        // natural oscillation frequency (equilibrium/pi*s)
         w: T,
         // damping ratio
         z: T,
@@ -42,7 +57,18 @@ fn UnderDampedSpring(comptime T: type) type {
         a: T,
     };
 }
-const OverDampedSpring = UnderDampedSpring;
+fn UnderDampedSpring(comptime T: type) type {
+    return MergeFields(
+        BaseSpring(T),
+        struct {
+            // velocity at latest refresh time
+            v: T,
+        },
+    );
+}
+fn OverDampedSpring(comptime T: type) type {
+    return BaseSpring(T);
+}
 
 pub const SpringIdx = packed struct(u32) {
     is_underdamped: bool,
@@ -172,6 +198,7 @@ pub fn newSpring(
             .w = w,
             .z = z,
             .a = w * std.math.sqrt(1 - z * z),
+            .v = conf.initial_velocity,
         });
     } else if (z > 1.0) {
         return try self.appendOverDamped(alloc, .{
@@ -191,13 +218,55 @@ pub fn newSpring(
 }
 
 pub fn getPosition(self: *Self, idx: SpringIdx) f32 {
-    const batch_idx = idx.idx / BATCH_SIZE;
-    const batch_ofs = idx.idx % BATCH_SIZE;
-    const slice = self.under_damped.slice();
-    return slice.items(.current_value)[batch_idx][batch_ofs];
+    if (idx.is_underdamped) {
+        // underdamped //
+        const batch_idx = idx.idx / BATCH_SIZE;
+        const batch_ofs = idx.idx % BATCH_SIZE;
+        const slice = self.under_damped.slice();
+        return slice.items(.current_value)[batch_idx][batch_ofs];
+    } else {
+        // overdamped //
+        const batch_idx = idx.idx / BATCH_SIZE;
+        const batch_ofs = idx.idx % BATCH_SIZE;
+        const slice = self.over_damped.slice();
+        return slice.items(.current_value)[batch_idx][batch_ofs];
+    }
 }
 
-pub fn updatePositions(self: *Self) void {
+pub fn isDone(self: *Self, idx: SpringIdx) bool {
+    // TODO: fine-tune these. They are mostly arbitrary for now.
+    const resting_v = 0.1; // units/s
+    const resting_x = 0.05; // units away from target
+
+    if (idx.is_underdamped) {
+        // underdamped //
+        const batch_idx = idx.idx / BATCH_SIZE;
+        const batch_ofs = idx.idx % BATCH_SIZE;
+        const slice = self.under_damped.slice();
+
+        const v = slice.items(.v)[batch_idx][batch_ofs];
+        const current_value = slice.items(.current_value)[batch_idx][batch_ofs];
+        const target_value = slice.items(.target_value)[batch_idx][batch_ofs];
+
+        return @fabs(v) < resting_v and
+            @fabs(current_value - target_value) < resting_x;
+    } else {
+        // overdamped //
+        const batch_idx = idx.idx / BATCH_SIZE;
+        const batch_ofs = idx.idx % BATCH_SIZE;
+        const slice = self.over_damped.slice();
+
+        // overdamped springs give a monotonically decreasing x, so we don't
+        // need to check velocity.
+        const current_value = slice.items(.current_value)[batch_idx][batch_ofs];
+        const target_value = slice.items(.target_value)[batch_idx][batch_ofs];
+
+        return @fabs(current_value - target_value) < resting_x;
+    }
+}
+
+// Update all springs
+pub fn update(self: *Self) void {
     const global_t = @as(BatchVec, @splat(self.getTimeOffset()));
 
     const ud_slice = self.under_damped.slice();
@@ -212,7 +281,8 @@ pub fn updatePositions(self: *Self) void {
         ud_slice.items(.w),
         ud_slice.items(.z),
         ud_slice.items(.a),
-    ) |target_value, *current_value, t0, x0, v0, w, z, a| {
+        ud_slice.items(.v),
+    ) |target_value, *current_value, t0, x0, v0, w, z, a, *v| {
         const t = global_t - t0;
 
         // const a = w * std.math.sqrt(1 - z * z);
@@ -223,7 +293,13 @@ pub fn updatePositions(self: *Self) void {
             p1 * @sin(t * a) //
         ) + target_value;
 
+        const new_velocity = @exp(t * q) * ( //
+            (q * x0 + a * p1) * @cos(t * a) +
+            (q * p1 - a * x0) * @sin(t * a) //
+        );
+
         current_value.* = new_value;
+        v.* = new_velocity;
     }
 
     for (
@@ -259,25 +335,26 @@ pub fn getVelocity(self: *Self, idx: SpringIdx) f32 {
     if (idx.is_underdamped) {
         // underdamped //
         const ud_slice = self.under_damped.slice();
+        return ud_slice.items(.v)[batch_idx][batch_ofs];
 
-        const t0 = ud_slice.items(.t0)[batch_idx][batch_ofs];
-        const t = global_t - t0;
+        // const t0 = ud_slice.items(.t0)[batch_idx][batch_ofs];
+        // const t = global_t - t0;
 
-        const w = ud_slice.items(.w)[batch_idx][batch_ofs];
-        const z = ud_slice.items(.z)[batch_idx][batch_ofs];
-        const x0 = ud_slice.items(.x0)[batch_idx][batch_ofs];
-        const v0 = ud_slice.items(.v0)[batch_idx][batch_ofs];
+        // const w = ud_slice.items(.w)[batch_idx][batch_ofs];
+        // const z = ud_slice.items(.z)[batch_idx][batch_ofs];
+        // const x0 = ud_slice.items(.x0)[batch_idx][batch_ofs];
+        // const v0 = ud_slice.items(.v0)[batch_idx][batch_ofs];
 
-        // const a = w * std.math.sqrt(1 - z * z);
-        const a = ud_slice.items(.a)[batch_idx][batch_ofs];
-        const q = -1 * w * z;
+        // // const a = w * std.math.sqrt(1 - z * z);
+        // const a = ud_slice.items(.a)[batch_idx][batch_ofs];
+        // const q = -1 * w * z;
 
-        const p1 = (v0 - x0 * q) / a;
+        // const p1 = (v0 - x0 * q) / a;
 
-        return @exp(t * q) * ( //
-            (q * x0 + a * p1) * @cos(t * a) +
-            (q * p1 - a * x0) * @sin(t * a) //
-        );
+        // return @exp(t * q) * ( //
+        //     (q * x0 + a * p1) * @cos(t * a) +
+        //     (q * p1 - a * x0) * @sin(t * a) //
+        // );
     } else {
         // overdamped //
         const od_slice = self.over_damped.slice();
@@ -301,6 +378,8 @@ pub fn getVelocity(self: *Self, idx: SpringIdx) f32 {
     }
 }
 
+// Update the target value of a spring "mid-flight" by maintaining it's
+// current position and velocity.
 pub fn stretchSpring(
     self: *Self,
     idx: SpringIdx,
@@ -328,6 +407,7 @@ pub fn stretchSpring(
     slice.items(.t0)[batch_idx][batch_ofs] = self.getTimeOffset();
 }
 
+// Get the current time in seconds since the start of the engine.
 fn getTimeOffset(self: *const Self) f32 {
     const now = std.time.Instant.now() catch unreachable;
     const duration_nanos = now.since(self.init_time);

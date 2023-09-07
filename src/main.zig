@@ -67,7 +67,7 @@ pub fn deinit(app: *App) void {
 }
 
 pub fn update(app: *App) !bool {
-    app.spring_engine.updatePositions();
+    app.spring_engine.update();
 
     var iter = core.pollEvents();
     while (iter.next()) |event| {
@@ -94,6 +94,16 @@ pub fn update(app: *App) !bool {
 
     const spring_x_pos = app.spring_engine.getPosition(app.spring_x);
     const spring_y_pos = app.spring_engine.getPosition(app.spring_y);
+    // if (app.spring_engine.isDone(app.spring_x)) {
+    //     std.log.info("spring x done", .{});
+    // } else {
+    //     std.log.info("x...", .{});
+    // }
+    // if (app.spring_engine.isDone(app.spring_y)) {
+    //     std.log.info("spring y done", .{});
+    // } else {
+    //     std.log.info("y...", .{});
+    // }
     try app.render_engine.writeRect(.{
         .origin = .{ spring_x_pos, spring_y_pos },
         .size = .{ 100, 100 },
