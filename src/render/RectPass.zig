@@ -2,7 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const gpu = core.gpu;
 
-const geo = @import("geo.zig");
+const geo = @import("../geo.zig");
 const buffer_writer = @import("buffer_writer.zig");
 const GPUBuffer = buffer_writer.GPUBuffer;
 
@@ -122,13 +122,9 @@ pub fn draw(
     });
     const color_attachment = gpu.RenderPassColorAttachment{
         .view = output_view,
-        .clear_value = gpu.Color{
-            .r = 13.0 / 255.0,
-            .g = 19.0 / 255.0,
-            .b = 33.0 / 255.0,
-            .a = 1,
-        },
-        .load_op = .clear,
+        // Shouldn't be used since .load_op = .load
+        .clear_value = undefined,
+        .load_op = .load,
         .store_op = .store,
     };
     defer output_view.release();

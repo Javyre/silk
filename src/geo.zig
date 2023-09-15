@@ -53,3 +53,10 @@ pub const Rect = struct {
         };
     }
 };
+
+pub const Box = struct {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+};

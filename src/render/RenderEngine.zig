@@ -2,7 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const gpu = core.gpu;
 
-const geo = @import("geo.zig");
+const geo = @import("../geo.zig");
 const RectPass = @import("RectPass.zig");
 
 const Self = @This();

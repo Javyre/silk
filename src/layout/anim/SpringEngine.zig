@@ -18,6 +18,14 @@ over_damped_len: usize,
 
 const BATCH_SIZE = 16;
 
+// TODO: use separate batch index and offset fields with sizes based on
+// BATCH_SIZE.
+// TODO: rename to SpringRef
+pub const SpringIdx = packed struct(u32) {
+    is_underdamped: bool,
+    idx: u31,
+};
+
 const BatchVec = @Vector(BATCH_SIZE, f32);
 const UnderDampedSpringBatches = std.MultiArrayList(UnderDampedSpring(BatchVec));
 const OverDampedSpringBatches = std.MultiArrayList(OverDampedSpring(BatchVec));
@@ -70,11 +78,6 @@ fn OverDampedSpring(comptime T: type) type {
     return BaseSpring(T);
 }
 
-pub const SpringIdx = packed struct(u32) {
-    is_underdamped: bool,
-    idx: u31,
-};
-
 pub fn init(alloc: std.mem.Allocator) !Self {
     const init_time = try std.time.Instant.now();
 
@@ -98,13 +101,80 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     defer self.over_damped.deinit(alloc);
 }
 
-const Config = struct {
+fn calcSpringProperties(cfg: struct {}) union(enum) {
+    under_damped: struct {
+        w: f32,
+        z: f32,
+        a: f32,
+    },
+    over_damped: struct {
+        w: f32,
+        z: f32,
+        a: f32,
+    },
+} {
+    _ = cfg;
+}
+
+pub const Config = struct {
     target_value: ?f32 = null,
-    initial_value: f32,
-    initial_velocity: f32 = 0,
+    initial_value: ?f32 = null,
+    initial_velocity: ?f32 = null,
+
     mass: f32,
     stiffness: f32,
     damping: f32,
+
+    pub fn toSpring(conf: *const Config) union(enum) {
+        under_damped: UnderDampedSpring(f32),
+        over_damped: OverDampedSpring(f32),
+    } {
+        const k = conf.stiffness;
+        const m = conf.mass;
+        const c = conf.damping;
+
+        const w = std.math.sqrt(k / m);
+        const z = c / (2 * m * w);
+
+        const initial_value = conf.initial_value orelse 0;
+        const target_value = conf.target_value orelse initial_value;
+        const x0 = initial_value - target_value;
+
+        if (z < 1.0) {
+            return .{
+                .under_damped = .{
+                    .target_value = target_value,
+                    .current_value = initial_value,
+                    // SPONGE
+                    // BUG: FIXME: this should be the current time!!!!
+                    .t0 = 0,
+                    .x0 = x0,
+                    .v0 = conf.initial_velocity orelse 0,
+                    .w = w,
+                    .z = z,
+                    .a = w * std.math.sqrt(1 - z * z),
+                    .v = conf.initial_velocity orelse 0,
+                },
+            };
+        } else if (z > 1.0) {
+            return .{
+                .over_damped = .{
+                    .target_value = target_value,
+                    .current_value = initial_value,
+                    // BUG: FIXME: this should be the current time!!!!
+                    .t0 = 0,
+                    .x0 = x0,
+                    .v0 = conf.initial_velocity orelse 0,
+                    .w = w,
+                    .z = z,
+                    .a = w * std.math.sqrt(z * z - 1),
+                },
+            };
+        } else {
+            // TODO: Critical damping
+            @panic("Critical damping is not supported");
+        }
+    }
 };
 
 fn appendUnderDamped(
@@ -178,59 +248,38 @@ pub fn newSpring(
     alloc: std.mem.Allocator,
     conf: Config,
 ) !SpringIdx {
-    const k = conf.stiffness;
-    const m = conf.mass;
-    const c = conf.damping;
-
-    const w = std.math.sqrt(k / m);
-    const z = c / (2 * m * w);
-
-    const target_value = conf.target_value orelse conf.initial_value;
-    const x0 = conf.initial_value - target_value;
-
-    if (z < 1.0) {
-        return try self.appendUnderDamped(alloc, .{
-            .target_value = target_value,
-            .current_value = conf.initial_value,
-            .t0 = 0,
-            .x0 = x0,
-            .v0 = conf.initial_velocity,
-            .w = w,
-            .z = z,
-            .a = w * std.math.sqrt(1 - z * z),
-            .v = conf.initial_velocity,
-        });
-    } else if (z > 1.0) {
-        return try self.appendOverDamped(alloc, .{
-            .target_value = target_value,
-            .current_value = conf.initial_value,
-            .t0 = 0,
-            .x0 = x0,
-            .v0 = conf.initial_velocity,
-            .w = w,
-            .z = z,
-            .a = w * std.math.sqrt(z * z - 1),
-        });
-    } else {
-        // TODO: Critical damping
-        @panic("Critical damping is not supported");
+    switch (conf.toSpring()) {
+        .under_damped => |ud| return self.appendUnderDamped(alloc, ud),
+        .over_damped => |od| return self.appendOverDamped(alloc, od),
     }
 }
 
-pub fn getPosition(self: *Self, idx: SpringIdx) f32 {
+pub inline fn getSpringField(
+    self: *Self,
+    idx: SpringIdx,
+    field: anytype,
+) f32 {
     if (idx.is_underdamped) {
         // underdamped //
         const batch_idx = idx.idx / BATCH_SIZE;
         const batch_ofs = idx.idx % BATCH_SIZE;
         const slice = self.under_damped.slice();
-        return slice.items(.current_value)[batch_idx][batch_ofs];
+        return slice.items(field)[batch_idx][batch_ofs];
     } else {
         // overdamped //
         const batch_idx = idx.idx / BATCH_SIZE;
         const batch_ofs = idx.idx % BATCH_SIZE;
         const slice = self.over_damped.slice();
-        return slice.items(.current_value)[batch_idx][batch_ofs];
+        return slice.items(field)[batch_idx][batch_ofs];
     }
+}
+
+pub fn getTargetValue(self: *Self, idx: SpringIdx) f32 {
+    return self.getSpringField(idx, .target_value);
+}
+
+pub fn getPosition(self: *Self, idx: SpringIdx) f32 {
+    return self.getSpringField(idx, .current_value);
 }
 
 pub fn isDone(self: *Self, idx: SpringIdx) bool {
@@ -375,6 +424,107 @@ pub fn getVelocity(self: *Self, idx: SpringIdx) f32 {
 
         return (x0 - p2) * (q - a) * @exp(t * (q - a)) +
             p2 * (q + a) * @exp(t * (q + a));
+    }
+}
+
+// Update the configuration of a spring while preserving it's velocity and
+// position.
+pub fn updateSpring(
+    self: *Self,
+    idx: SpringIdx,
+    pconf: struct {
+        // State
+        target_value: ?f32 = null,
+        current_value: ?f32 = null,
+        current_velocity: ?f32 = null,
+
+        // Properties
+        mass: ?f32 = null,
+        stiffness: ?f32 = null,
+        damping: ?f32 = null,
+    },
+) void {
+    const batch_idx = idx.idx / BATCH_SIZE;
+    const batch_ofs = idx.idx % BATCH_SIZE;
+
+    const properties_changed =
+        pconf.mass != null or
+        pconf.stiffness != null or
+        pconf.damping != null;
+    const state_changed =
+        pconf.target_value != null or
+        pconf.current_value != null or
+        pconf.current_velocity != null;
+
+    if (state_changed) {
+        // Capture current state, modify it, and start from current time as t0.
+
+        if (idx.is_underdamped) {
+            const slice = self.under_damped.slice();
+
+            const new_target_value = pconf.target_value orelse
+                slice.items(.target_value)[batch_idx][batch_ofs];
+            const new_initial_value = pconf.current_value orelse
+                slice.items(.current_value)[batch_idx][batch_ofs];
+            const new_initial_velocity = pconf.current_velocity orelse
+                slice.items(.v)[batch_idx][batch_ofs];
+
+            const x0 = new_initial_value - new_target_value;
+            const v0 = new_initial_velocity;
+
+            slice.items(.x0)[batch_idx][batch_ofs] = x0;
+            slice.items(.v0)[batch_idx][batch_ofs] = v0;
+            slice.items(.v)[batch_idx][batch_ofs] = v0;
+            slice.items(.target_value)[batch_idx][batch_ofs] = new_target_value;
+            slice.items(.t0)[batch_idx][batch_ofs] = self.getTimeOffset();
+        } else {
+            const slice = self.over_damped.slice();
+
+            const new_target_value = pconf.target_value orelse
+                slice.items(.target_value)[batch_idx][batch_ofs];
+            const new_initial_value = pconf.current_value orelse
+                slice.items(.current_value)[batch_idx][batch_ofs];
+            const new_initial_velocity = pconf.current_velocity orelse
+                self.getVelocity(idx);
+
+            const x0 = new_initial_value - new_target_value;
+            const v0 = new_initial_velocity;
+
+            slice.items(.x0)[batch_idx][batch_ofs] = x0;
+            slice.items(.v0)[batch_idx][batch_ofs] = v0;
+            slice.items(.target_value)[batch_idx][batch_ofs] = new_target_value;
+            slice.items(.t0)[batch_idx][batch_ofs] = self.getTimeOffset();
+        }
+    }
+
+    if (properties_changed) {
+        if (pconf.stiffness != null and
+            pconf.mass != null and
+            pconf.damping != null)
+        {
+            const k = pconf.stiffness.?;
+            const m = pconf.mass.?;
+            const c = pconf.damping.?;
+
+            // TODO: dedup this and Config.toSpring
+            const w = std.math.sqrt(k / m);
+            const z = c / (2 * m * w);
+            const a = w * std.math.sqrt(1 - @fabs(z * z));
+
+            if (idx.is_underdamped) {
+                const slice = self.under_damped.slice();
+                slice.items(.w)[batch_idx][batch_ofs] = w;
+                slice.items(.z)[batch_idx][batch_ofs] = z;
+                slice.items(.a)[batch_idx][batch_ofs] = a;
+            } else {
+                const slice = self.over_damped.slice();
+                slice.items(.w)[batch_idx][batch_ofs] = w;
+                slice.items(.z)[batch_idx][batch_ofs] = z;
+                slice.items(.a)[batch_idx][batch_ofs] = a;
+            }
+        } else {
+            @panic("Unimplemented. All properties must be specified at the same time.");
+        }
     }
 }
 
