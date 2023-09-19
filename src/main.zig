@@ -19,63 +19,141 @@ view_1: u32,
 title_timer: core.Timer,
 
 pub fn init(app: *App) !void {
-    try core.init(.{});
+    const size = .{ .width = 1920 / 2, .height = 1080 / 2 };
+    try core.init(.{ .size = size });
 
     app.gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
     const alloc = app.gpa.allocator();
     const render_engine = RenderEngine.init(alloc);
     var layout_engine = try LayoutEngine.init(alloc);
+    const le = &layout_engine;
 
-    const view_1 = try layout_engine.appendChild(0, .{
+    le.setRootSize(.{
+        .dims = .{
+            @as(f32, @floatFromInt(size.width)) * 2,
+            @as(f32, @floatFromInt(size.height)) * 2,
+        },
+    });
+
+    try le.getAttr(0, .padding).setValue(50);
+
+    const view_1 = try le.appendChild(0, .{
         .kind = .view,
         .dirt = .{},
+        .display = .flex,
 
-        .outer_box_x = anim.Value{ .immediate = 100.0 },
-        .outer_box_y = anim.Value{ .immediate = 100.0 },
-        .outer_box_width = anim.Value.zero,
-        .outer_box_height = anim.Value.zero,
+        .margin_bottom = anim.Value{ .immediate = 50.0 },
+
+        .background_color = anim.Color{
+            .r = .{ .immediate = 0.7 },
+            .g = .{ .immediate = 1.0 },
+            .b = .{ .immediate = 0.01 },
+            .a = .{ .immediate = 0.75 },
+        },
+
+        .corner_radius_top_left_x = anim.Value{ .immediate = 50.0 },
+        .corner_radius_top_left_y = anim.Value{ .immediate = 50.0 },
     });
 
-    try layout_engine.getAttr(view_1, .outer_box_width).setSpring(.{
-        .target_value = 300.0,
-        .mass = 1.0,
-        .stiffness = 800.0,
-        .damping = 20.0,
-    });
-    try layout_engine.getAttr(view_1, .outer_box_height).setSpring(.{
-        .target_value = 200.0,
-        .mass = 1.0,
-        .stiffness = 800.0,
-        .damping = 20.0,
-    });
+    try le.getAttr(view_1, .corner_radius_bottom_left_x).setSpring(.{});
+    try le.getAttr(view_1, .corner_radius_bottom_left_y).setSpring(.{});
+    try le.getAttr(view_1, .corner_radius).setValue(17);
 
-    const corner_radius_spring = .{
-        .target_value = 50.0,
-        .mass = 2.0,
-        .stiffness = 200.0,
-        .damping = 10.0,
-    };
-    try layout_engine.getAttr(view_1, .corner_radius_top_left_x)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_top_left_y)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_top_right_x)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_top_right_y)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_top_left_x)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_top_left_y)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_bottom_left_x)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_bottom_left_y)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_bottom_right_x)
-        .setSpring(corner_radius_spring);
-    try layout_engine.getAttr(view_1, .corner_radius_bottom_right_y)
-        .setSpring(corner_radius_spring);
+    const view_2 = try le.appendChild(0, .{
+        .kind = .view,
+        .dirt = .{},
+        .display = .flex,
+        .flex_direction = .column,
+
+        .background_color = anim.Color{
+            .r = .{ .immediate = 0.4 },
+            .g = .{ .immediate = 0.4 },
+            .b = .{ .immediate = 0.4 },
+            .a = .{ .immediate = 1 },
+        },
+    });
+    try le.getAttr(view_2, .corner_radius).setValue(17);
+
+    const view_2_a = try le.appendChild(view_2, .{
+        .kind = .view,
+        .dirt = .{},
+        .display = .flex,
+        .flex_basis = anim.Value{ .immediate = 400.0 },
+        .flex_shrink = anim.Value{ .immediate = 0.0 },
+        // .flex_grow = anim.Value{ .immediate = 0.0 },
+
+        .background_color = anim.Color{
+            .r = .{ .immediate = 0.9 },
+            .g = .{ .immediate = 0.9 },
+            .b = .{ .immediate = 0.9 },
+            .a = .{ .immediate = 1 },
+        },
+    });
+    try le.getAttr(view_2_a, .margin).setValue(5);
+    try le.getAttr(view_2_a, .corner_radius).setValue(17 - 5);
+
+    const view_2_b = try le.appendChild(view_2, .{
+        .kind = .view,
+        .dirt = .{},
+        .display = .flex,
+        .flex_basis = anim.Value{ .immediate = 400.0 },
+        .flex_shrink = anim.Value{ .immediate = 1.0 },
+        .flex_grow = anim.Value{ .immediate = 0.0 },
+
+        .margin_left = anim.Value{ .immediate = 50.0 },
+
+        .background_color = anim.Color{
+            .r = .{ .immediate = 0.01 },
+            .g = .{ .immediate = 1.0 },
+            .b = .{ .immediate = 0.7 },
+            .a = .{ .immediate = 0.75 },
+        },
+    });
+    try le.getAttr(view_2_b, .corner_radius).setValue(17);
+
+    // const tight_spring = .{
+    //     .mass = 1.0,
+    //     .stiffness = 800.0,
+    //     .damping = 20.0,
+    // };
+    // const corner_radius_spring = .{
+    //     .target_value = 50.0,
+    //     .mass = 2.0,
+    //     .stiffness = 200.0,
+    //     .damping = 10.0,
+    // };
+
+    // try le.getAttr(view_1, .outer_box_width).setSpring(tight_spring);
+    // try le.getAttr(view_1, .outer_box_height).setSpring(tight_spring);
+
+    // try le.getAttr(view_1, .outer_box_width).setSpring(.{
+    //     .target_value = 200,
+    // });
+    // try le.getAttr(view_1, .outer_box_height).setSpring(.{
+    //     .target_value = 200,
+    // });
+
+    // try le.getAttr(view_1, .corner_radius_top_left_x)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_top_left_y)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_top_right_x)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_top_right_y)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_top_left_x)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_top_left_y)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_bottom_left_x)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_bottom_left_y)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_bottom_right_x)
+    //     .setSpring(corner_radius_spring);
+    // try le.getAttr(view_1, .corner_radius_bottom_right_y)
+    //     .setSpring(corner_radius_spring);
 
     app.* = .{
         .gpa = app.gpa,
@@ -110,50 +188,41 @@ pub fn update(app: *App) !bool {
     while (iter.next()) |event| {
         switch (event) {
             .close => return true,
+            .framebuffer_resize => |size| {
+                app.layout_engine.setRootSize(.{
+                    .dims = .{
+                        @as(f32, @floatFromInt(size.width)),
+                        @as(f32, @floatFromInt(size.height)),
+                    },
+                });
+            },
             .mouse_press => |ev| {
                 _ = ev;
 
-                const spring = .{
-                    .initial_velocity = 2 * 1000.0,
-                    .mass = 1.0,
-                    .stiffness = 800.0,
-                    .damping = 20.0,
-                };
-                var spring_inv = .{
-                    .initial_velocity = -1000.0,
-                    .mass = 1.0,
-                    .stiffness = 800.0,
-                    .damping = 20.0,
-                };
-
-                try app.layout_engine.getAttr(app.view_1, .outer_box_x)
-                    .setSpring(spring_inv);
-                try app.layout_engine.getAttr(app.view_1, .outer_box_y)
-                    .setSpring(spring_inv);
-                try app.layout_engine.getAttr(app.view_1, .outer_box_width)
-                    .setSpring(spring);
-                try app.layout_engine.getAttr(app.view_1, .outer_box_height)
-                    .setSpring(spring);
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_x)
+                //     .setSpring(.{ .initial_velocity = -1 * 1000.0 });
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_y)
+                //     .setSpring(.{ .initial_velocity = -1 * 1000.0 });
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_width)
+                //     .setSpring(.{ .initial_velocity = 2 * 1000.0 });
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_height)
+                //     .setSpring(.{ .initial_velocity = 2 * 1000.0 });
             },
             .mouse_motion => |ev| {
-                // ev.pos;
                 const target_x = @as(f32, @floatCast(ev.pos.x * 2));
+                _ = target_x;
                 const target_y = @as(f32, @floatCast(ev.pos.y * 2));
+                _ = target_y;
 
-                try app.layout_engine.getAttr(app.view_1, .outer_box_x)
-                    .setSpring(.{
-                    .target_value = target_x,
-                    .mass = 1.0,
-                    .stiffness = 800.0,
-                    .damping = 20.0,
-                });
-                try app.layout_engine.getAttr(app.view_1, .outer_box_y)
-                    .setSpring(.{
-                    .target_value = target_y,
-                    .mass = 1.0,
-                    .stiffness = 800.0,
-                    .damping = 20.0,
-                });
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_x)
+                //     .setSpring(.{
+                //     .target_value = target_x,
+                // });
+                // try app.layout_engine.getAttr(app.view_1, .outer_box_y)
+                //     .setSpring(.{
+                //     .target_value = target_y,
+                // });
+
                 // try app.layout_engine.getAttr(app.view_1, .corner_radius_bottom_right_x)
                 //     .setSpring(.{
                 //     .target_value = 100.0 * (@sin(target_x / 200.0) + 1),
@@ -178,6 +247,7 @@ pub fn update(app: *App) !bool {
 
     const back_buffer = core.swap_chain.getCurrentTexture().?;
 
+    try app.layout_engine.flushLayout();
     try app.layout_engine.renderFrame(&app.render_engine);
     app.render_engine.flushScene(back_buffer);
 
