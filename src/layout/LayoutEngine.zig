@@ -90,47 +90,93 @@ const Element = struct {
 };
 
 const Elements = std.MultiArrayList(Element);
-const Attr = enum {
-    //
-    // Direct attributes
-    //
 
-    display,
+const element_attrs = .{
+    .direct = enum {
+        display,
 
-    flex_direction,
-    flex_grow,
-    flex_shrink,
-    flex_basis,
+        flex_direction,
+        flex_grow,
+        flex_shrink,
+        flex_basis,
 
-    margin_top,
-    margin_bottom,
-    margin_left,
-    margin_right,
+        margin_top,
+        margin_bottom,
+        margin_left,
+        margin_right,
 
-    padding_top,
-    padding_bottom,
-    padding_left,
-    padding_right,
+        padding_top,
+        padding_bottom,
+        padding_left,
+        padding_right,
 
-    corner_radius_top_left_x,
-    corner_radius_top_left_y,
-    corner_radius_top_right_x,
-    corner_radius_top_right_y,
-    corner_radius_bottom_left_x,
-    corner_radius_bottom_left_y,
-    corner_radius_bottom_right_x,
-    corner_radius_bottom_right_y,
+        corner_radius_top_left_x,
+        corner_radius_top_left_y,
+        corner_radius_top_right_x,
+        corner_radius_top_right_y,
+        corner_radius_bottom_left_x,
+        corner_radius_bottom_left_y,
+        corner_radius_bottom_right_x,
+        corner_radius_bottom_right_y,
 
-    background_color,
+        background_color,
+    },
 
-    //
-    // Virtual attributes
-    //
-
-    margin,
-    padding,
-    corner_radius,
+    .virtual = .{
+        .margin = .{
+            .margin_top,
+            .margin_bottom,
+            .margin_left,
+            .margin_right,
+        },
+        .padding = .{
+            .padding_top,
+            .padding_bottom,
+            .padding_left,
+            .padding_right,
+        },
+        .corner_radius = .{
+            .corner_radius_top_left_x,
+            .corner_radius_top_left_y,
+            .corner_radius_top_right_x,
+            .corner_radius_top_right_y,
+            .corner_radius_bottom_left_x,
+            .corner_radius_bottom_left_y,
+            .corner_radius_bottom_right_x,
+            .corner_radius_bottom_right_y,
+        },
+    },
 };
+
+const Attr = x: {
+    const d_fnames = std.meta.fieldNames(element_attrs.direct);
+    const v_fnames = std.meta.fieldNames(@TypeOf(element_attrs.virtual));
+    const names = d_fnames ++ v_fnames;
+
+    var fields: [names.len]std.builtin.Type.EnumField = undefined;
+    for (names, &fields, 0..) |name, *field, i| {
+        field.* = .{ .name = name, .value = i };
+    }
+
+    break :x @Type(std.builtin.Type{
+        .Enum = .{
+            .tag_type = std.math.IntFittingRange(0, names.len),
+            .decls = &.{},
+            .fields = &fields,
+            .is_exhaustive = true,
+        },
+    });
+};
+
+fn isDirectAttr(attr: Attr) bool {
+    const name = @tagName(attr);
+    return std.meta.fieldIndex(element_attrs.direct, name) != null;
+}
+
+fn isVirtualAttr(attr: Attr) bool {
+    const name = @tagName(attr);
+    return std.meta.fieldIndex(@TypeOf(element_attrs.virtual), name) != null;
+}
 
 alloc: Allocator,
 animators: anim.Engines,
@@ -224,51 +270,17 @@ pub fn getAttr(
     self: *Self,
     el: u32,
     comptime attr: Attr,
-) anim.ValueRef(switch (attr) {
-    .margin => 4,
-    .padding => 4,
-    .corner_radius => 8,
-    else => 1,
+) anim.ValueRef(x: {
+    if (isDirectAttr(attr)) {
+        break :x 1;
+    } else if (isVirtualAttr(attr)) {
+        break :x @field(element_attrs.virtual, @tagName(attr)).len;
+    } else {
+        unreachable;
+    }
 }) {
-    switch (attr) {
-        // Virtual attributes
-        .margin => return .{
-            .values = .{
-                &self.elements.items(.margin_top)[el],
-                &self.elements.items(.margin_bottom)[el],
-                &self.elements.items(.margin_left)[el],
-                &self.elements.items(.margin_right)[el],
-            },
-            .engines = &self.animators,
-            .alloc = self.alloc,
-        },
-        .padding => return .{
-            .values = .{
-                &self.elements.items(.padding_top)[el],
-                &self.elements.items(.padding_bottom)[el],
-                &self.elements.items(.padding_left)[el],
-                &self.elements.items(.padding_right)[el],
-            },
-            .engines = &self.animators,
-            .alloc = self.alloc,
-        },
-        .corner_radius => return .{
-            .values = .{
-                &self.elements.items(.corner_radius_top_left_x)[el],
-                &self.elements.items(.corner_radius_top_left_y)[el],
-                &self.elements.items(.corner_radius_top_right_x)[el],
-                &self.elements.items(.corner_radius_top_right_y)[el],
-                &self.elements.items(.corner_radius_bottom_left_x)[el],
-                &self.elements.items(.corner_radius_bottom_left_y)[el],
-                &self.elements.items(.corner_radius_bottom_right_x)[el],
-                &self.elements.items(.corner_radius_bottom_right_y)[el],
-            },
-            .engines = &self.animators,
-            .alloc = self.alloc,
-        },
-
-        // Transparent attributes
-        else => return .{
+    if (comptime isDirectAttr(attr)) {
+        return .{
             .values = .{
                 &self.elements.items(@field(
                     Elements.Field,
@@ -277,7 +289,21 @@ pub fn getAttr(
             },
             .engines = &self.animators,
             .alloc = self.alloc,
-        },
+        };
+    } else if (comptime isVirtualAttr(attr)) {
+        const fields = @field(element_attrs.virtual, @tagName(attr));
+        var values: [fields.len]*anim.Value = undefined;
+        inline for (fields, &values) |field, *value| {
+            value.* = &self.elements.items(field)[el];
+        }
+
+        return .{
+            .values = values,
+            .engines = &self.animators,
+            .alloc = self.alloc,
+        };
+    } else {
+        unreachable;
     }
 }
 
