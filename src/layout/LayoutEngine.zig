@@ -37,7 +37,7 @@ const Element = struct {
     first_child: u32 = NONE_INDEX, // Only used for kind = .view
     next_sibling: u32 = NONE_INDEX,
 
-    dirt: DirtFlags,
+    flags: Flags = .{},
 
     display: DisplayMode = .flex,
 
@@ -78,8 +78,10 @@ const Element = struct {
 
     background_color: anim.Color = anim.Color.transparent,
 
-    const DirtFlags = packed struct(u8) {
-        outer_box: bool = false,
+    const Flags = packed struct(u8) {
+        dirt: packed struct(u1) {
+            outer_box: bool = false,
+        } = .{},
         _padding: u7 = undefined,
     };
 
@@ -92,7 +94,7 @@ const Element = struct {
 const Elements = std.MultiArrayList(Element);
 
 const element_attrs = .{
-    .direct = enum {
+    .Direct = enum {
         display,
 
         flex_direction,
@@ -123,33 +125,24 @@ const element_attrs = .{
     },
 
     .virtual = .{
-        .margin = .{
-            .margin_top,
-            .margin_bottom,
-            .margin_left,
-            .margin_right,
-        },
-        .padding = .{
-            .padding_top,
-            .padding_bottom,
-            .padding_left,
-            .padding_right,
-        },
+        .margin = .{ "top", "bottom", "left", "right" },
+        .padding = .{ "top", "bottom", "left", "right" },
+
         .corner_radius = .{
-            .corner_radius_top_left_x,
-            .corner_radius_top_left_y,
-            .corner_radius_top_right_x,
-            .corner_radius_top_right_y,
-            .corner_radius_bottom_left_x,
-            .corner_radius_bottom_left_y,
-            .corner_radius_bottom_right_x,
-            .corner_radius_bottom_right_y,
+            "top_left_x",     "top_left_y",
+            "top_right_x",    "top_right_y",
+            "bottom_left_x",  "bottom_left_y",
+            "bottom_right_x", "bottom_right_y",
         },
+        .corner_radius_top_left = .{ "x", "y" },
+        .corner_radius_top_right = .{ "x", "y" },
+        .corner_radius_bottom_left = .{ "x", "y" },
+        .corner_radius_bottom_right = .{ "x", "y" },
     },
 };
 
 const Attr = x: {
-    const d_fnames = std.meta.fieldNames(element_attrs.direct);
+    const d_fnames = std.meta.fieldNames(element_attrs.Direct);
     const v_fnames = std.meta.fieldNames(@TypeOf(element_attrs.virtual));
     const names = d_fnames ++ v_fnames;
 
@@ -170,7 +163,7 @@ const Attr = x: {
 
 fn isDirectAttr(attr: Attr) bool {
     const name = @tagName(attr);
-    return std.meta.fieldIndex(element_attrs.direct, name) != null;
+    return std.meta.fieldIndex(element_attrs.Direct, name) != null;
 }
 
 fn isVirtualAttr(attr: Attr) bool {
@@ -196,7 +189,6 @@ pub fn init(alloc: Allocator) !Self {
     // nodes.
     try self.elements.append(alloc, .{
         .kind = .view,
-        .dirt = .{},
     });
 
     return self;
@@ -211,7 +203,7 @@ pub fn setRootSize(self: *Self, dims: geo.ScreenDims) void {
     const slice = self.elements.slice();
     slice.items(.outer_box_width)[0] = dims.dims[0];
     slice.items(.outer_box_height)[0] = dims.dims[1];
-    slice.items(.dirt)[0].outer_box = true;
+    slice.items(.flags)[0].dirt.outer_box = true;
 }
 
 fn appendElement(self: *Self, el: Element) !u32 {
@@ -291,10 +283,13 @@ pub fn getAttr(
             .alloc = self.alloc,
         };
     } else if (comptime isVirtualAttr(attr)) {
-        const fields = @field(element_attrs.virtual, @tagName(attr));
-        var values: [fields.len]*anim.Value = undefined;
-        inline for (fields, &values) |field, *value| {
-            value.* = &self.elements.items(field)[el];
+        const suffixes = @field(element_attrs.virtual, @tagName(attr));
+
+        var values: [suffixes.len]*anim.Value = undefined;
+        inline for (suffixes, &values) |suffix, *value| {
+            value.* = &self.elements.items(
+                @field(Elements.Field, @tagName(attr) ++ "_" ++ suffix),
+            )[el];
         }
 
         return .{
@@ -335,10 +330,10 @@ pub fn flushLayout(
     const slice = self.elements.slice();
 
     // Top-down traversal of the tree. (no other guaranteed ordering)
-    for (slice.items(.dirt), 0..) |*dirt, _i| {
+    for (slice.items(.flags), 0..) |*flags, _i| {
         const i: u32 = @intCast(_i);
 
-        if (dirt.outer_box) {
+        if (flags.dirt.outer_box) {
             const layout = slice.items(.display)[i];
 
             switch (layout) {
@@ -484,13 +479,13 @@ pub fn flushLayout(
                             (cm.left + cm.right);
                         slice.items(.outer_box_height)[child] = child_box.height -
                             (cm.top + cm.bottom);
-                        slice.items(.dirt)[child].outer_box = true;
+                        slice.items(.flags)[child].dirt.outer_box = true;
                     }
                 },
             }
 
             // dirt resolved
-            dirt.outer_box = false;
+            flags.dirt.outer_box = false;
         }
     }
 }

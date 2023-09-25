@@ -40,7 +40,6 @@ pub fn init(app: *App) !void {
 
     const view_1 = try le.appendChild(0, .{
         .kind = .view,
-        .dirt = .{},
         .display = .flex,
 
         .margin_bottom = anim.Value{ .immediate = 50.0 },
@@ -62,7 +61,6 @@ pub fn init(app: *App) !void {
 
     const view_2 = try le.appendChild(0, .{
         .kind = .view,
-        .dirt = .{},
         .display = .flex,
         .flex_direction = .column,
 
@@ -77,7 +75,6 @@ pub fn init(app: *App) !void {
 
     const view_2_a = try le.appendChild(view_2, .{
         .kind = .view,
-        .dirt = .{},
         .display = .flex,
         .flex_basis = anim.Value{ .immediate = 400.0 },
         .flex_shrink = anim.Value{ .immediate = 0.0 },
@@ -95,7 +92,6 @@ pub fn init(app: *App) !void {
 
     const view_2_b = try le.appendChild(view_2, .{
         .kind = .view,
-        .dirt = .{},
         .display = .flex,
         .flex_basis = anim.Value{ .immediate = 400.0 },
         .flex_shrink = anim.Value{ .immediate = 1.0 },
