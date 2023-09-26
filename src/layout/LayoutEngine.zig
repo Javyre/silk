@@ -34,10 +34,15 @@ const FlexDirection = enum {
 const Element = struct {
     kind: Kind,
 
+    /// The label can be used for debugging purposes.
+    /// (memory not owned by the layout engine)
+    label: ?[]const u8 = undefined,
+
     first_child: u32 = NONE_INDEX, // Only used for kind = .view
     next_sibling: u32 = NONE_INDEX,
 
     flags: Flags = .{},
+    sort_index_: u32 = NONE_INDEX, // temp field for sorting
 
     display: DisplayMode = .flex,
 
@@ -189,6 +194,7 @@ pub fn init(alloc: Allocator) !Self {
     // nodes.
     try self.elements.append(alloc, .{
         .kind = .view,
+        .label = "root",
     });
 
     return self;
@@ -580,4 +586,212 @@ pub fn renderFrame(
             },
         }
     }
+}
+
+/// Sort the elements in a breadth-first order.
+/// Invalidates references to elements.
+///
+/// This should be done every so often to keep the tree cache-friendly.
+///
+/// Our layout algorithms assume that the elements are sorted parent > child,
+/// but optimize for the breadth-first case.
+pub fn reindexElementsBreadthFirst(self: *Self) !void {
+    const slice = self.elements.slice();
+
+    var queue = std.ArrayList(u32).init(self.alloc);
+    defer queue.deinit();
+    var queue_head: u32 = 0;
+
+    var index_map = try self.alloc.alloc(u32, self.elements.len);
+    defer self.alloc.free(index_map);
+
+    var i: u32 = 0;
+    var visiting: u32 = 0;
+    while (true) {
+        const first_child = slice.items(.first_child)[visiting];
+        const next_sibling = slice.items(.next_sibling)[visiting];
+
+        slice.items(.sort_index_)[visiting] = i;
+        index_map[visiting] = i;
+        i += 1;
+
+        if (first_child != NONE_INDEX) {
+            try queue.append(first_child);
+        }
+
+        if (next_sibling != NONE_INDEX) {
+            visiting = next_sibling;
+        } else {
+            if (queue_head >= queue.items.len)
+                break;
+
+            visiting = queue.items[queue_head];
+            queue_head += 1;
+
+            // try to save on memory:
+            if (queue_head >= queue.items.len / 2) {
+                @memcpy(
+                    queue.items[0 .. queue.items.len - queue_head],
+                    queue.items[queue_head..],
+                );
+                queue.items.len -= queue_head;
+                queue_head = 0;
+            }
+        }
+    }
+
+    self.elements.sortUnstable(struct {
+        indices: []u32,
+        pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+            return ctx.indices[a_index] < ctx.indices[b_index];
+        }
+    }{
+        .indices = slice.items(.sort_index_),
+    });
+
+    // correct the invalidated indices
+    for (
+        slice.items(.first_child),
+        slice.items(.next_sibling),
+    ) |*first_child, *next_sibling| {
+        if (first_child.* != NONE_INDEX) {
+            first_child.* = index_map[first_child.*];
+        }
+        if (next_sibling.* != NONE_INDEX) {
+            next_sibling.* = index_map[next_sibling.*];
+        }
+    }
+}
+
+/// Dumps the tree in a human-readable format.
+/// Useful for debugging.
+///
+/// ```zig
+/// const alloc = std.testing.allocator;
+/// const le = try LayoutEngine.init(alloc);
+/// try le.appendChild(0, .{ .kind = .view });
+/// try le.appendChild(0, .{ .kind = .view });
+///
+/// try std.testing.expectEqualStrings(
+///     \\0
+///     \\├─ 1
+///     \\└─ 2
+/// ,
+///     try le.dumpTree(alloc),
+/// );
+/// ```
+pub fn dumpTree(self: *const Self, alloc: std.mem.Allocator) ![]const u8 {
+    const slice = self.elements.slice();
+
+    var buf = std.ArrayList(u8).init(alloc);
+    var buf_writer = buf.writer();
+    var stack = std.ArrayList(u32).init(alloc);
+    var depth: u32 = 0;
+
+    // pre-order traversal
+    var visiting: u32 = 0;
+
+    // var i: u32 = 0;
+    outer: while (true) {
+        const next_sibling = slice.items(.next_sibling)[visiting];
+        const first_child = slice.items(.first_child)[visiting];
+
+        // visit
+        if (depth > 0) {
+            for (stack.items[1..]) |parent_next_sibling| {
+                if (parent_next_sibling == NONE_INDEX) {
+                    try buf_writer.writeAll("   ");
+                } else {
+                    try buf_writer.writeAll("│  ");
+                }
+            }
+            if (next_sibling == NONE_INDEX) {
+                try buf_writer.writeAll("└─ ");
+            } else {
+                try buf_writer.writeAll("├─ ");
+            }
+        }
+        try buf_writer.print("{}", .{visiting});
+        if (slice.items(.label)[visiting]) |label| {
+            try buf_writer.print(" ({s})", .{label});
+        }
+
+        if (first_child != NONE_INDEX) {
+            try stack.append(next_sibling);
+            visiting = first_child;
+            depth += 1;
+        } else if (next_sibling != NONE_INDEX) {
+            visiting = next_sibling;
+        } else {
+            while (true) {
+                if (stack.items.len == 0) {
+                    break :outer;
+                }
+                visiting = stack.pop();
+                depth -= 1;
+
+                if (visiting != NONE_INDEX)
+                    break;
+            }
+        }
+
+        try buf_writer.writeByte('\n');
+    }
+
+    return buf.toOwnedSlice();
+}
+
+test "tree mutations" {
+    const alloc = std.testing.allocator;
+
+    // arena for temp strings
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    const arena_alloc = arena.allocator();
+    defer arena.deinit();
+
+    // layout engine
+    var le = try Self.init(alloc);
+    defer {
+        le.deinit() catch unreachable;
+    }
+
+    try std.testing.expectEqualStrings("0 (root)", try le.dumpTree(arena_alloc));
+
+    const view_1 = try le.appendChild(0, .{ .label = "1", .kind = .view });
+    const view_1_a = try le.appendChild(view_1, .{ .label = "1a", .kind = .view });
+    const view_1_b = try le.appendChild(view_1, .{ .label = "1b", .kind = .view });
+    const view_2 = try le.appendChild(0, .{ .label = "2", .kind = .view });
+    const view_2_a = try le.appendChild(view_2, .{ .label = "2a", .kind = .view });
+    const view_1_c = try le.appendChild(view_1, .{ .label = "1c", .kind = .view });
+
+    _ = view_1_a;
+    _ = view_1_b;
+    _ = view_2_a;
+    _ = view_1_c;
+
+    try std.testing.expectEqualStrings(
+        \\0 (root)
+        \\├─ 1 (1)
+        \\│  ├─ 2 (1a)
+        \\│  ├─ 3 (1b)
+        \\│  └─ 6 (1c)
+        \\└─ 4 (2)
+        \\   └─ 5 (2a)
+    ,
+        try le.dumpTree(arena_alloc),
+    );
+
+    try le.reindexElementsBreadthFirst();
+
+    try std.testing.expectEqualStrings(
+        \\0 (root)
+        \\├─ 1 (1)
+        \\│  ├─ 3 (1a)
+        \\│  ├─ 4 (1b)
+        \\│  └─ 5 (1c)
+        \\└─ 2 (2)
+        \\   └─ 6 (2a)
+    ,
+        try le.dumpTree(arena_alloc),
+    );
 }

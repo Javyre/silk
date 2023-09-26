@@ -8,6 +8,10 @@ const RenderEngine = @import("render/RenderEngine.zig");
 const geo = @import("geo.zig");
 const anim = @import("layout/anim.zig");
 
+test {
+    _ = LayoutEngine;
+}
+
 pub const App = @This();
 
 gpa: std.heap.GeneralPurposeAllocator(.{}),
