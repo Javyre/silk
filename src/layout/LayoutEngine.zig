@@ -12,6 +12,10 @@ const NONE_INDEX: u32 = std.math.maxInt(u32);
 const MAX_INDEX: u32 = std.math.maxInt(u32) - 1;
 const MAX_CHILDREN: u32 = 2048;
 
+const Err = error{
+    OutOfMemory,
+};
+
 const DisplayMode = enum {
     flex,
 };
@@ -32,7 +36,7 @@ const FlexDirection = enum {
 };
 
 const Element = struct {
-    kind: Kind,
+    kind: Kind = .view,
 
     /// The label can be used for debugging purposes.
     /// (memory not owned by the layout engine)
@@ -212,7 +216,7 @@ pub fn setRootSize(self: *Self, dims: geo.ScreenDims) void {
     slice.items(.flags)[0].dirt.outer_box = true;
 }
 
-fn appendElement(self: *Self, el: Element) !u32 {
+fn appendElement(self: *Self, el: Element) Err!u32 {
     const new_idx: u32 = @intCast(self.elements.len);
     if (new_idx >= MAX_INDEX) {
         return error.OutOfMemory;
@@ -221,13 +225,13 @@ fn appendElement(self: *Self, el: Element) !u32 {
     return new_idx;
 }
 
-pub fn appendChild(self: *Self, parent: u32, el: Element) !u32 {
+pub fn appendChild(self: *Self, parent: u32, el: Element) Err!u32 {
     const new_idx = try self.appendElement(el);
     self.setLastChild(parent, new_idx);
     return new_idx;
 }
 
-pub fn appendSibling(self: *Self, sibling: u32, el: Element) !u32 {
+pub fn appendSibling(self: *Self, sibling: u32, el: Element) Err!u32 {
     const new_idx = try self.appendElement(el);
     self.setNextSibling(sibling, new_idx);
     return new_idx;
@@ -751,24 +755,34 @@ test "tree mutations" {
 
     // layout engine
     var le = try Self.init(alloc);
-    defer {
-        le.deinit() catch unreachable;
-    }
+    defer (le.deinit() catch unreachable);
 
     try std.testing.expectEqualStrings("0 (root)", try le.dumpTree(arena_alloc));
 
-    const view_1 = try le.appendChild(0, .{ .label = "1", .kind = .view });
-    const view_1_a = try le.appendChild(view_1, .{ .label = "1a", .kind = .view });
-    const view_1_b = try le.appendChild(view_1, .{ .label = "1b", .kind = .view });
-    const view_2 = try le.appendChild(0, .{ .label = "2", .kind = .view });
-    const view_2_a = try le.appendChild(view_2, .{ .label = "2a", .kind = .view });
-    const view_1_c = try le.appendChild(view_1, .{ .label = "1c", .kind = .view });
+    var view_1: u32 = undefined;
+    try le.appendChildTree(0, .{
+        .label = "1",
+        .kind = .view,
+        .ref = &view_1,
+        .children = .{
+            .{ .label = "1a", .kind = .view },
+            .{ .label = "1b", .kind = .view },
+        },
+    });
+    try le.appendChildTree(0, .{
+        .label = "2",
+        .kind = .view,
+        .children = .{
+            .{ .label = "2a", .kind = .view },
+        },
+    });
 
-    _ = view_1_a;
-    _ = view_1_b;
-    _ = view_2_a;
-    _ = view_1_c;
+    try le.appendChildTree(view_1, .{
+        .label = "1c",
+        .kind = .view,
+    });
 
+    // insertion order
     try std.testing.expectEqualStrings(
         \\0 (root)
         \\├─ 1 (1)
@@ -783,6 +797,7 @@ test "tree mutations" {
 
     try le.reindexElementsBreadthFirst();
 
+    // breadth-first order
     try std.testing.expectEqualStrings(
         \\0 (root)
         \\├─ 1 (1)
@@ -794,4 +809,123 @@ test "tree mutations" {
     ,
         try le.dumpTree(arena_alloc),
     );
+}
+
+// =============================================================================
+// API Frontend
+//
+
+// FIXME: once https://github.com/ziglang/zig/issues/6211 is fixed, we can
+//        embed the Element fields instead of having the props field.
+// pub const ElementTree = x: {
+//     const ExtraFields = struct {
+//         ref: ?*u32 = null,
+//         // placeholder type
+//         children: []void = undefined,
+//     };
+
+//     const fields = std.meta.fields(Element) ++ std.meta.fields(ExtraFields);
+
+//     break :x @Type(std.builtin.Type{
+//         .Struct = .{
+//             .layout = .Auto,
+//             .fields = &fields,
+//             .decls = &.{},
+//             .is_tuple = false,
+//         },
+//     });
+// };
+
+fn typeWithRef(comptime T: type) type {
+    return if (std.meta.fieldIndex(T, "ref") != null)
+        T
+    else
+        @Type(std.builtin.Type{
+            .Struct = std.builtin.Type.Struct{
+                .layout = .Auto,
+                .fields = std.meta.fields(T) ++
+                    std.meta.fields(struct { ref: *u32 }),
+                .decls = &.{},
+                .is_tuple = false,
+            },
+        });
+}
+
+fn treeWithRef(maybe_ref: *u32, tree: anytype) typeWithRef(@TypeOf(tree)) {
+    if (std.meta.fieldIndex(@TypeOf(tree), "ref") != null) {
+        return tree;
+    } else {
+        var ret: typeWithRef(@TypeOf(tree)) = undefined;
+        ret.ref = maybe_ref;
+        inline for (comptime std.meta.fieldNames(@TypeOf(tree))) |fname| {
+            @field(ret, fname) = @field(tree, fname);
+        }
+        return ret;
+    }
+}
+
+pub fn appendChildTree(self: *Self, parent: u32, tree: anytype) Err!void {
+    const Tree = @TypeOf(tree);
+    var el: Element = .{};
+
+    inline for (comptime std.meta.fieldNames(Element)) |fname| {
+        if (std.meta.fieldIndex(Tree, fname) != null)
+            @field(el, fname) = @field(tree, fname);
+    }
+
+    const el_idx = try self.appendChild(parent, el);
+    if (std.meta.fieldIndex(Tree, "ref") != null) {
+        std.debug.assert(@TypeOf(tree.ref) == *u32);
+        tree.ref.* = el_idx;
+    }
+
+    if (std.meta.fieldIndex(Tree, "children") != null) {
+        if (tree.children.len > 0) {
+            var ref_store: u32 = undefined;
+            const first_child = treeWithRef(&ref_store, tree.children[0]);
+
+            try self.appendChildTree(el_idx, first_child);
+            var prev_sibling = first_child.ref.*;
+
+            inline for (1..tree.children.len) |i| {
+                const child = treeWithRef(&ref_store, tree.children[i]);
+
+                try self.appendSiblingTree(prev_sibling, child);
+                prev_sibling = child.ref.*;
+            }
+        }
+    }
+}
+
+pub fn appendSiblingTree(self: *Self, sibling: u32, tree: anytype) Err!void {
+    const Tree = @TypeOf(tree);
+    var el: Element = .{};
+
+    inline for (comptime std.meta.fieldNames(Element)) |fname| {
+        if (std.meta.fieldIndex(Tree, fname) != null)
+            @field(el, fname) = @field(tree, fname);
+    }
+
+    const el_idx = try self.appendSibling(sibling, el);
+    if (std.meta.fieldIndex(Tree, "ref") != null) {
+        std.debug.assert(@TypeOf(tree.ref) == *u32);
+        tree.ref.* = el_idx;
+    }
+
+    if (std.meta.fieldIndex(Tree, "children") != null) {
+        if (tree.children.len > 0) {
+            var ref_store: u32 = undefined;
+            const first_child = treeWithRef(&ref_store, tree.children[0]);
+
+            try self.appendChildTree(el_idx, first_child);
+            var prev_sibling = first_child.ref.*;
+
+            inline for (1..tree.children.len) |i| {
+                const child = treeWithRef(&ref_store, tree.children[i]);
+
+                try self.appendSiblingTree(prev_sibling, child);
+                prev_sibling = child.ref.*;
+            }
+        }
+    }
 }
