@@ -297,8 +297,8 @@ pub fn isDone(self: *Self, idx: SpringIdx) bool {
         const current_value = slice.items(.current_value)[batch_idx][batch_ofs];
         const target_value = slice.items(.target_value)[batch_idx][batch_ofs];
 
-        return @fabs(v) < resting_v and
-            @fabs(current_value - target_value) < resting_x;
+        return @abs(v) < resting_v and
+            @abs(current_value - target_value) < resting_x;
     } else {
         // overdamped //
         const batch_idx = idx.idx / BATCH_SIZE;
@@ -310,7 +310,7 @@ pub fn isDone(self: *Self, idx: SpringIdx) bool {
         const current_value = slice.items(.current_value)[batch_idx][batch_ofs];
         const target_value = slice.items(.target_value)[batch_idx][batch_ofs];
 
-        return @fabs(current_value - target_value) < resting_x;
+        return @abs(current_value - target_value) < resting_x;
     }
 }
 
@@ -509,7 +509,7 @@ pub fn updateSpring(
             // TODO: dedup this and Config.toSpring
             const w = std.math.sqrt(k / m);
             const z = c / (2 * m * w);
-            const a = w * std.math.sqrt(1 - @fabs(z * z));
+            const a = w * std.math.sqrt(1 - @abs(z * z));
 
             if (idx.is_underdamped) {
                 const slice = self.under_damped.slice();

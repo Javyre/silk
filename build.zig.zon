@@ -1,10 +1,15 @@
 .{
     .name = "silk",
     .version = "0.0.0",
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
     .dependencies = .{
         .mach_core = .{
-            .url = "https://pkg.machengine.org/mach-core/93f390f61edd09a39b67fb6fee1f13a432572b4e.tar.gz",
-            .hash = "1220c90fcb6a12a9659f4971e12ec53db017eb082abd3ebf4d1b8f703412c84228ae",
+            .url = "https://pkg.machengine.org/mach-core/13a84a917c6af2f1f14ab78e0a006e43f5d6b0b5.tar.gz",
+            .hash = "12200d39f58e94a4727811fd3e47ac08f0cc90e6533c49deab81fe9f28f2ee11dba1",
         },
     },
 }
