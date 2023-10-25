@@ -1,3 +1,45 @@
+//! == Layout Engine ==
+//!
+//! Heavily DOM-inspired layout engine.
+//!
+//! We store elements as a SOA in topological order (parent > child).
+//! The tree is kept track of with:
+//! - first_child: the first child of a node
+//! - next_sibling: the next sibling of a node
+//!
+//! e.g.: the tree
+//! a
+//! ├─ b
+//! │  ├─ c
+//! │  └─ d
+//! └─ e
+//!
+//! is represented as:
+//!
+//! a
+//! └─> b ──> e
+//!     └─> c ──> d
+//!
+//! `└─>`: First Child
+//! `──>`: Next Sibling
+//!
+//! and stored as:
+//!
+//! [ a, b, e, c, d ]
+//!
+//! The `first_child` and `next_sibling` are strong references.
+//! The `backlink` is a weak reference to the single strong reference that
+//! exists to the current element.
+//!
+//! NOTE: We optimize for breadth-first ordering but assume only topological
+//!       ordering.
+//!
+//! NOTE: Notice that there is at most two references to each element.
+//!       This helps reduce the writes during tree mutations at the cost of
+//!       some extra reads to find certain relatives (parent, nth sibling,
+//!       etc.)
+//!
+
 const std = @import("std");
 const geo = @import("../geo.zig");
 const anim = @import("anim.zig");
@@ -44,6 +86,9 @@ const Element = struct {
 
     first_child: u32 = NONE_INDEX, // Only used for kind = .view
     next_sibling: u32 = NONE_INDEX,
+    /// weak reference to owning element of this element (either by first_child
+    /// or next_sibling).
+    backlink: u32 = NONE_INDEX,
 
     flags: Flags = .{},
     sort_index_: u32 = NONE_INDEX, // temp field for sorting
@@ -183,12 +228,18 @@ fn isVirtualAttr(attr: Attr) bool {
 alloc: Allocator,
 animators: anim.Engines,
 elements: Elements = .{},
+// TODO: turn this into a fixed-size array and if it gets full, we simply
+//       defragment our element storage.
+free_elements: std.ArrayList(u32),
 
 pub fn init(alloc: Allocator) !Self {
     var self = Self{
         .alloc = alloc,
         .animators = try anim.Engines.init(alloc),
+        .free_elements = std.ArrayList(u32).init(alloc),
     };
+
+    try self.free_elements.ensureTotalCapacity(255);
 
     try self.elements.ensureTotalCapacity(alloc, 255);
 
@@ -206,6 +257,7 @@ pub fn init(alloc: Allocator) !Self {
 
 pub fn deinit(self: *Self) !void {
     defer self.animators.deinit(self.alloc);
+    defer self.free_elements.deinit();
     defer self.elements.deinit(self.alloc);
 }
 
@@ -216,7 +268,27 @@ pub fn setRootSize(self: *Self, dims: geo.ScreenDims) void {
     slice.items(.flags)[0].dirt.outer_box = true;
 }
 
-fn appendElement(self: *Self, el: Element) Err!u32 {
+/// Allocated a new element with an index greater than `greater_idx_than`.
+/// If `greater_idx_than` is null, the index is greater than all indices.
+fn appendElement(self: *Self, el: Element, greater_idx_than: ?u32) Err!u32 {
+    // Medium-effort looking through the free_elements.
+    if (self.free_elements.items.len > 0) {
+        const last = self.free_elements.items.len - 1;
+        const max = @min(1024, self.free_elements.items.len);
+        const gthan_idx = greater_idx_than orelse 0;
+
+        // start search from end to recycle most recent elements first.
+        // (more likely to be cache-hot)
+        for (0..max) |i| {
+            const free_idx = self.free_elements.items[last - i];
+            if (free_idx > gthan_idx) {
+                _ = self.free_elements.swapRemove(last - i);
+                return free_idx;
+            }
+        }
+    }
+
+    // Give up recycling and just allocate a new index.
     const new_idx: u32 = @intCast(self.elements.len);
     if (new_idx >= MAX_INDEX) {
         return error.OutOfMemory;
@@ -225,16 +297,213 @@ fn appendElement(self: *Self, el: Element) Err!u32 {
     return new_idx;
 }
 
+test "appendElement recycles" {
+    var le = try Self.init(std.testing.allocator);
+    defer (le.deinit() catch unreachable);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var a_ref: u32 = undefined;
+    var a_a_ref: u32 = undefined;
+    var a_b_ref: u32 = undefined;
+    var a_c_ref: u32 = undefined;
+    try le.appendChildTree(0, .{
+        .label = "a",
+        .kind = .view,
+        .ref = &a_ref,
+        .children = .{
+            .{ .label = "a.a", .kind = .view, .ref = &a_a_ref },
+            .{ .label = "a.b", .kind = .view, .ref = &a_b_ref },
+            .{ .label = "a.c", .kind = .view, .ref = &a_c_ref },
+        },
+    });
+
+    try le.removeElement(a_a_ref);
+    try le.removeElement(a_b_ref);
+    try le.removeElement(a_c_ref);
+    try le.removeElement(a_ref);
+    try std.testing.expectEqualSlices(u32, &.{
+        a_a_ref,
+        a_b_ref,
+        a_c_ref,
+        a_ref,
+    }, le.free_elements.items);
+
+    var b_ref: u32 = undefined;
+    try le.appendChildTree(0, .{ .label = "b", .kind = .view, .ref = &b_ref });
+
+    // Search for free element starts from end.
+    // constraint is: new_idx > 0
+    try std.testing.expectEqual(a_ref, b_ref);
+    try std.testing.expectEqualSlices(u32, &.{
+        a_a_ref,
+        a_b_ref,
+        a_c_ref,
+    }, le.free_elements.items);
+
+    var c_ref: u32 = undefined;
+    try le.appendChildTree(0, .{ .label = "c", .kind = .view, .ref = &c_ref });
+
+    // Search for free element starts from end.
+    // constraint is: new_idx > a_a_ref
+    try std.testing.expectEqual(a_c_ref, c_ref);
+    try std.testing.expectEqualSlices(u32, &.{
+        a_a_ref,
+        a_c_ref,
+    }, le.free_elements.items);
+}
+
+/// Appends an element to the given parent.
+///
+/// The element is inserted as the last child of the parent.
 pub fn appendChild(self: *Self, parent: u32, el: Element) Err!u32 {
-    const new_idx = try self.appendElement(el);
+    const new_idx = try self.appendElement(el, parent);
     self.setLastChild(parent, new_idx);
     return new_idx;
 }
 
+/// Appends an element as the next sibling of the given sibling.
 pub fn appendSibling(self: *Self, sibling: u32, el: Element) Err!u32 {
-    const new_idx = try self.appendElement(el);
+    const new_idx = try self.appendElement(el, sibling);
     self.setNextSibling(sibling, new_idx);
     return new_idx;
+}
+
+/// Removes the given element from the tree.
+pub fn removeElement(self: *Self, idx: u32) Err!void {
+    const slice = self.elements.slice();
+    const backlink = slice.items(.backlink)[idx];
+
+    // only root is not owned by another element.
+    std.debug.assert(backlink != NONE_INDEX);
+
+    // Parents own their first_sibling and incidently their entire subtree.
+    const first_child = slice.items(.first_child)[idx];
+    var child = first_child;
+    while (child != NONE_INDEX) {
+        const next_child = slice.items(.next_sibling)[child];
+        try self.removeElement(child);
+        child = next_child;
+    }
+
+    const next_sibling = slice.items(.next_sibling)[idx];
+    const parent_first_child = &slice.items(.first_child)[backlink];
+    const prev_next_sibling = &slice.items(.next_sibling)[backlink];
+
+    if (parent_first_child.* == idx) {
+        parent_first_child.* = next_sibling;
+    } else if (prev_next_sibling.* == idx) {
+        prev_next_sibling.* = next_sibling;
+    } else {
+        const backlink_label = slice.items(.label)[backlink];
+        const label = slice.items(.label)[idx];
+
+        std.debug.panic("backlinked element {} ({?s}) does not actually own this element {} ({?s})", .{
+            backlink, backlink_label,
+            idx,      label,
+        });
+    }
+
+    if (next_sibling != NONE_INDEX) {
+        slice.items(.backlink)[next_sibling] = backlink;
+    }
+    if (first_child != NONE_INDEX) {
+        slice.items(.backlink)[first_child] = backlink;
+    }
+
+    try self.free_elements.append(idx);
+}
+
+test "removeElement preserves backlinks" {
+    var le = try Self.init(std.testing.allocator);
+    defer (le.deinit() catch unreachable);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var a_ref: u32 = undefined;
+    var a_a_ref: u32 = undefined;
+    var a_b_ref: u32 = undefined;
+    var a_c_ref: u32 = undefined;
+    try le.appendChildTree(0, .{
+        .label = "a",
+        .kind = .view,
+        .ref = &a_ref,
+        .children = .{
+            .{ .label = "a.a", .kind = .view, .ref = &a_a_ref },
+            .{ .label = "a.b", .kind = .view, .ref = &a_b_ref },
+            .{ .label = "a.c", .kind = .view, .ref = &a_c_ref },
+        },
+    });
+
+    const eq = expectElementIndex;
+    try eq(&le, @as(u32, 0), le.elements.items(.backlink)[a_ref]);
+    try eq(&le, a_ref, le.elements.items(.backlink)[a_a_ref]);
+    try eq(&le, a_a_ref, le.elements.items(.backlink)[a_b_ref]);
+    try eq(&le, a_b_ref, le.elements.items(.backlink)[a_c_ref]);
+
+    try le.removeElement(a_b_ref);
+
+    try eq(&le, @as(u32, 0), le.elements.items(.backlink)[a_ref]);
+    try eq(&le, a_ref, le.elements.items(.backlink)[a_a_ref]);
+    try eq(&le, a_a_ref, le.elements.items(.backlink)[a_c_ref]);
+}
+
+test "removeElement recurses and bookkeeps" {
+    var le = try Self.init(std.testing.allocator);
+    defer (le.deinit() catch unreachable);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var a_ref: u32 = undefined;
+    var a_a_ref: u32 = undefined;
+    var a_b_ref: u32 = undefined;
+    var a_c_ref: u32 = undefined;
+    try le.appendChildTree(0, .{
+        .label = "a",
+        .kind = .view,
+        .ref = &a_ref,
+        .children = .{
+            .{ .label = "a.a", .kind = .view, .ref = &a_a_ref },
+            .{ .label = "a.b", .kind = .view, .ref = &a_b_ref },
+            .{ .label = "a.c", .kind = .view, .ref = &a_c_ref },
+        },
+    });
+    try std.testing.expectEqualStrings(
+        \\(root)
+        \\└─ (a)
+        \\   ├─ (a.a)
+        \\   ├─ (a.b)
+        \\   └─ (a.c)
+    ,
+        try le.dumpTree(arena.allocator(), .{}),
+    );
+    try std.testing.expectEqualSlices(u32, le.free_elements.items, &.{});
+
+    try le.removeElement(a_c_ref);
+    try std.testing.expectEqualStrings(
+        \\(root)
+        \\└─ (a)
+        \\   ├─ (a.a)
+        \\   └─ (a.b)
+    ,
+        try le.dumpTree(arena.allocator(), .{}),
+    );
+    try std.testing.expectEqualSlices(u32, le.free_elements.items, &.{
+        a_c_ref,
+    });
+
+    try le.removeElement(a_ref);
+    try std.testing.expectEqualStrings(
+        \\(root)
+    ,
+        try le.dumpTree(arena.allocator(), .{}),
+    );
+    try std.testing.expectEqualSlices(u32, le.free_elements.items, &.{
+        a_c_ref, a_a_ref, a_b_ref, a_ref,
+    });
 }
 
 fn setLastChild(self: *Self, parent: u32, child: u32) void {
@@ -249,12 +518,14 @@ fn setLastChild(self: *Self, parent: u32, child: u32) void {
 
     if (first_child == NONE_INDEX) {
         slice.items(.first_child)[parent] = child;
+        slice.items(.backlink)[child] = parent;
     } else {
         var last_child = first_child;
         while (slice.items(.next_sibling)[last_child] != NONE_INDEX) {
             last_child = slice.items(.next_sibling)[last_child];
         }
         slice.items(.next_sibling)[last_child] = child;
+        slice.items(.backlink)[child] = last_child;
     }
 }
 
@@ -266,6 +537,9 @@ fn setNextSibling(self: *Self, sibling: u32, next_sibling: u32) void {
     const next_next_sibling = slice.items(.next_sibling)[sibling];
     slice.items(.next_sibling)[sibling] = next_sibling;
     slice.items(.next_sibling)[next_sibling] = next_next_sibling;
+    slice.items(.backlink)[next_sibling] = sibling;
+    if (next_next_sibling != NONE_INDEX)
+        slice.items(.backlink)[next_next_sibling] = next_sibling;
 }
 
 pub fn getAttr(
@@ -667,6 +941,19 @@ pub fn reindexElementsBreadthFirst(self: *Self) !void {
     }
 }
 
+pub fn expectElementIndex(self: *const Self, expected: u32, actual: u32) !void {
+    if (actual != expected) {
+        const slice = self.elements.slice();
+        const expected_label = slice.items(.label)[expected];
+        const actual_label = slice.items(.label)[actual];
+        std.debug.print("expected element index {} ({?s}), got {} ({?s})", .{
+            expected, expected_label,
+            actual,   actual_label,
+        });
+        return error.TestExpectedEqual;
+    }
+}
+
 /// Dumps the tree in a human-readable format.
 /// Useful for debugging.
 ///
@@ -681,10 +968,14 @@ pub fn reindexElementsBreadthFirst(self: *Self) !void {
 ///     \\├─ 1
 ///     \\└─ 2
 /// ,
-///     try le.dumpTree(alloc),
+///     try le.dumpTree(alloc, .{}),
 /// );
 /// ```
-pub fn dumpTree(self: *const Self, alloc: std.mem.Allocator) ![]const u8 {
+pub fn dumpTree(self: *const Self, alloc: std.mem.Allocator, opts: struct {
+    show_index: bool = false,
+    show_label: bool = true,
+    show_backlink: bool = false,
+}) ![]const u8 {
     const slice = self.elements.slice();
 
     var buf = std.ArrayList(u8).init(alloc);
@@ -715,9 +1006,33 @@ pub fn dumpTree(self: *const Self, alloc: std.mem.Allocator) ![]const u8 {
                 try buf_writer.writeAll("├─ ");
             }
         }
-        try buf_writer.print("{}", .{visiting});
-        if (slice.items(.label)[visiting]) |label| {
-            try buf_writer.print(" ({s})", .{label});
+        var is_first = true;
+        if (opts.show_index) {
+            if (!is_first) try buf_writer.writeAll(" ");
+            is_first = false;
+
+            try buf_writer.print(":{}", .{visiting});
+        }
+        if (opts.show_label) {
+            if (!is_first) try buf_writer.writeAll(" ");
+            is_first = false;
+
+            if (slice.items(.label)[visiting]) |label| {
+                try buf_writer.print("({s})", .{label});
+            } else {
+                try buf_writer.writeAll("(none)");
+            }
+        }
+        if (opts.show_backlink) {
+            if (!is_first) try buf_writer.writeAll(" ");
+            is_first = false;
+
+            const backlink = slice.items(.backlink)[visiting];
+            if (backlink == NONE_INDEX) {
+                try buf_writer.writeAll("^:none");
+            } else {
+                try buf_writer.print("^:{}", .{backlink});
+            }
         }
 
         if (first_child != NONE_INDEX) {
@@ -757,7 +1072,10 @@ test "tree mutations" {
     var le = try Self.init(alloc);
     defer (le.deinit() catch unreachable);
 
-    try std.testing.expectEqualStrings("0 (root)", try le.dumpTree(arena_alloc));
+    try std.testing.expectEqualStrings(
+        ":0 (root)",
+        try le.dumpTree(arena_alloc, .{ .show_index = true }),
+    );
 
     var view_1: u32 = undefined;
     try le.appendChildTree(0, .{
@@ -784,30 +1102,30 @@ test "tree mutations" {
 
     // insertion order
     try std.testing.expectEqualStrings(
-        \\0 (root)
-        \\├─ 1 (1)
-        \\│  ├─ 2 (1a)
-        \\│  ├─ 3 (1b)
-        \\│  └─ 6 (1c)
-        \\└─ 4 (2)
-        \\   └─ 5 (2a)
+        \\:0 (root)
+        \\├─ :1 (1)
+        \\│  ├─ :2 (1a)
+        \\│  ├─ :3 (1b)
+        \\│  └─ :6 (1c)
+        \\└─ :4 (2)
+        \\   └─ :5 (2a)
     ,
-        try le.dumpTree(arena_alloc),
+        try le.dumpTree(arena_alloc, .{ .show_index = true }),
     );
 
     try le.reindexElementsBreadthFirst();
 
     // breadth-first order
     try std.testing.expectEqualStrings(
-        \\0 (root)
-        \\├─ 1 (1)
-        \\│  ├─ 3 (1a)
-        \\│  ├─ 4 (1b)
-        \\│  └─ 5 (1c)
-        \\└─ 2 (2)
-        \\   └─ 6 (2a)
+        \\:0 (root)
+        \\├─ :1 (1)
+        \\│  ├─ :3 (1a)
+        \\│  ├─ :4 (1b)
+        \\│  └─ :5 (1c)
+        \\└─ :2 (2)
+        \\   └─ :6 (2a)
     ,
-        try le.dumpTree(arena_alloc),
+        try le.dumpTree(arena_alloc, .{ .show_index = true }),
     );
 }
 
