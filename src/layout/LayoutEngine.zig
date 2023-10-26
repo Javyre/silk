@@ -350,7 +350,7 @@ test "appendElement recycles" {
     try std.testing.expectEqual(a_c_ref, c_ref);
     try le.expectElementIndices(&.{
         a_a_ref,
-        a_c_ref,
+        a_b_ref,
     }, le.free_elements.items);
 }
 
