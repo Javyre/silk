@@ -348,7 +348,7 @@ test "appendElement recycles" {
     // Search for free element starts from end.
     // constraint is: new_idx > a_a_ref
     try std.testing.expectEqual(a_c_ref, c_ref);
-    try std.testing.expectEqualSlices(u32, &.{
+    try le.expectElementIndices(&.{
         a_a_ref,
         a_c_ref,
     }, le.free_elements.items);
@@ -941,17 +941,61 @@ pub fn reindexElementsBreadthFirst(self: *Self) !void {
     }
 }
 
+const PrettyIndex = struct {
+    index: u32,
+    engine: *const Self,
+
+    pub fn format(
+        value: @This(),
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        const slice = value.engine.elements.slice();
+        try writer.print("{} ({?s})", .{
+            value.index,
+            slice.items(.label)[value.index],
+        });
+    }
+};
+
 pub fn expectElementIndex(self: *const Self, expected: u32, actual: u32) !void {
     if (actual != expected) {
-        const slice = self.elements.slice();
-        const expected_label = slice.items(.label)[expected];
-        const actual_label = slice.items(.label)[actual];
-        std.debug.print("expected element index {} ({?s}), got {} ({?s})", .{
-            expected, expected_label,
-            actual,   actual_label,
+        const expected_pretty = PrettyIndex{ .index = expected, .engine = self };
+        const actual_pretty = PrettyIndex{ .index = actual, .engine = self };
+
+        std.debug.print("expected element index {}, got {}", .{
+            expected_pretty,
+            actual_pretty,
         });
         return error.TestExpectedEqual;
     }
+}
+
+pub fn expectElementIndices(
+    self: *const Self,
+    expected: []const u32,
+    actual: []const u32,
+) !void {
+    var pretty_expected =
+        try std.testing.allocator.alloc(PrettyIndex, expected.len);
+    defer std.testing.allocator.free(pretty_expected);
+    var pretty_actual =
+        try std.testing.allocator.alloc(PrettyIndex, actual.len);
+    defer std.testing.allocator.free(pretty_actual);
+
+    for (expected, pretty_expected) |idx, *pretty| {
+        pretty.* = .{ .index = idx, .engine = self };
+    }
+    for (actual, pretty_actual) |idx, *pretty| {
+        pretty.* = .{ .index = idx, .engine = self };
+    }
+
+    return std.testing.expectEqualSlices(
+        PrettyIndex,
+        pretty_expected,
+        pretty_actual,
+    );
 }
 
 /// Dumps the tree in a human-readable format.
