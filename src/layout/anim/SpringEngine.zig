@@ -117,6 +117,8 @@ fn calcSpringProperties(cfg: struct {}) union(enum) {
 }
 
 pub const Config = struct {
+    // FIXME: make these not optional. The PartialConfig.toConfig should be
+    //        the only place where the defaults are described.
     target_value: ?f32 = null,
     initial_value: ?f32 = null,
     initial_velocity: ?f32 = null,
@@ -174,6 +176,33 @@ pub const Config = struct {
             // TODO: Critical damping
             @panic("Critical damping is not supported");
         }
+    }
+};
+
+pub const PartialConfig = struct {
+    target_value: ?f32 = null,
+    initial_value: ?f32 = null,
+    initial_velocity: ?f32 = null,
+
+    mass: ?f32 = null,
+    stiffness: ?f32 = null,
+    damping: ?f32 = null,
+
+    /// Convert this partial config into a full config by filling in
+    /// missing fields with defaults.
+    pub fn toConfig(self: @This()) Config {
+        const current_value =
+            self.target_value orelse
+            self.initial_value orelse 0.0;
+        return .{
+            .target_value = self.target_value orelse current_value,
+            .initial_value = self.initial_value orelse current_value,
+            .initial_velocity = self.initial_velocity orelse 0.0,
+
+            .mass = self.mass orelse 1.0,
+            .stiffness = self.stiffness orelse 95.0,
+            .damping = self.damping orelse 16.0,
+        };
     }
 };
 
@@ -252,6 +281,15 @@ pub fn newSpring(
         .under_damped => |ud| return self.appendUnderDamped(alloc, ud),
         .over_damped => |od| return self.appendOverDamped(alloc, od),
     }
+}
+
+pub fn freeSpring(
+    self: *Self,
+    idx: SpringIdx,
+) void {
+    _ = self;
+    _ = idx;
+    @panic("Unimplemented");
 }
 
 pub inline fn getSpringField(
@@ -432,29 +470,19 @@ pub fn getVelocity(self: *Self, idx: SpringIdx) f32 {
 pub fn updateSpring(
     self: *Self,
     idx: SpringIdx,
-    pconf: struct {
-        // State
-        target_value: ?f32 = null,
-        current_value: ?f32 = null,
-        current_velocity: ?f32 = null,
-
-        // Properties
-        mass: ?f32 = null,
-        stiffness: ?f32 = null,
-        damping: ?f32 = null,
-    },
+    changeset: PartialConfig,
 ) void {
     const batch_idx = idx.idx / BATCH_SIZE;
     const batch_ofs = idx.idx % BATCH_SIZE;
 
     const properties_changed =
-        pconf.mass != null or
-        pconf.stiffness != null or
-        pconf.damping != null;
+        changeset.mass != null or
+        changeset.stiffness != null or
+        changeset.damping != null;
     const state_changed =
-        pconf.target_value != null or
-        pconf.current_value != null or
-        pconf.current_velocity != null;
+        changeset.target_value != null or
+        changeset.initial_value != null or
+        changeset.initial_velocity != null;
 
     if (state_changed) {
         // Capture current state, modify it, and start from current time as t0.
@@ -462,11 +490,11 @@ pub fn updateSpring(
         if (idx.is_underdamped) {
             const slice = self.under_damped.slice();
 
-            const new_target_value = pconf.target_value orelse
+            const new_target_value = changeset.target_value orelse
                 slice.items(.target_value)[batch_idx][batch_ofs];
-            const new_initial_value = pconf.current_value orelse
+            const new_initial_value = changeset.initial_value orelse
                 slice.items(.current_value)[batch_idx][batch_ofs];
-            const new_initial_velocity = pconf.current_velocity orelse
+            const new_initial_velocity = changeset.initial_velocity orelse
                 slice.items(.v)[batch_idx][batch_ofs];
 
             const x0 = new_initial_value - new_target_value;
@@ -480,11 +508,11 @@ pub fn updateSpring(
         } else {
             const slice = self.over_damped.slice();
 
-            const new_target_value = pconf.target_value orelse
+            const new_target_value = changeset.target_value orelse
                 slice.items(.target_value)[batch_idx][batch_ofs];
-            const new_initial_value = pconf.current_value orelse
+            const new_initial_value = changeset.initial_value orelse
                 slice.items(.current_value)[batch_idx][batch_ofs];
-            const new_initial_velocity = pconf.current_velocity orelse
+            const new_initial_velocity = changeset.initial_velocity orelse
                 self.getVelocity(idx);
 
             const x0 = new_initial_value - new_target_value;
@@ -498,13 +526,13 @@ pub fn updateSpring(
     }
 
     if (properties_changed) {
-        if (pconf.stiffness != null and
-            pconf.mass != null and
-            pconf.damping != null)
+        if (changeset.stiffness != null and
+            changeset.mass != null and
+            changeset.damping != null)
         {
-            const k = pconf.stiffness.?;
-            const m = pconf.mass.?;
-            const c = pconf.damping.?;
+            const k = changeset.stiffness.?;
+            const m = changeset.mass.?;
+            const c = changeset.damping.?;
 
             // TODO: dedup this and Config.toSpring
             const w = std.math.sqrt(k / m);

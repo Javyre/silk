@@ -35,82 +35,82 @@ pub fn init(app: *App) !void {
 
     le.setRootSize(.{
         .dims = .{
+            // FIXME: investigate how to detect retina displays/screen scaling factor.
             @as(f32, @floatFromInt(size.width)) * 2,
             @as(f32, @floatFromInt(size.height)) * 2,
         },
     });
 
-    try le.getAttr(0, .padding).setValue(50);
+    try le.getAttr(0, .padding).set(anim.value(50));
 
-    const view_1 = try le.appendChild(0, .{
+    var view_1: u32 = undefined;
+    try le.appendChildTree(0, .{
         .kind = .view,
         .display = .flex,
-
-        .margin_bottom = anim.Value{ .immediate = 50.0 },
-
-        .background_color = anim.Color{
-            .r = .{ .immediate = 0.7 },
-            .g = .{ .immediate = 1.0 },
-            .b = .{ .immediate = 0.01 },
-            .a = .{ .immediate = 0.75 },
-        },
-
-        .corner_radius_top_left_x = anim.Value{ .immediate = 50.0 },
-        .corner_radius_top_left_y = anim.Value{ .immediate = 50.0 },
+        .ref = &view_1,
+        // TODO: animated layout param causes rerender/relayout until done.
+        .margin_bottom = anim.value(50.0).spring(.{}).from(0),
+        .background_color = anim.color(.{
+            .r = anim.value(0.7),
+            .g = anim.value(1.0),
+            .b = anim.value(0.01),
+            .a = anim.value(0.75),
+        }),
+        .corner_radius_top_left = anim.value(50.0),
     });
+    try le.getAttr(view_1, .corner_radius_bottom_left).set(anim.spring(.{}));
+    try le.getAttr(view_1, .corner_radius).set(anim.value(17.0));
 
-    try le.getAttr(view_1, .corner_radius_bottom_left_x).setSpring(.{});
-    try le.getAttr(view_1, .corner_radius_bottom_left_y).setSpring(.{});
-    try le.getAttr(view_1, .corner_radius).setValue(17);
-
-    const view_2 = try le.appendChild(0, .{
+    var view_2: u32 = undefined;
+    var view_2_a: u32 = undefined;
+    var view_2_b: u32 = undefined;
+    try le.appendChildTree(0, .{
         .kind = .view,
         .display = .flex,
         .flex_direction = .column,
-
-        .background_color = anim.Color{
-            .r = .{ .immediate = 0.4 },
-            .g = .{ .immediate = 0.4 },
-            .b = .{ .immediate = 0.4 },
-            .a = .{ .immediate = 1 },
+        .ref = &view_2,
+        .corner_radius = anim.value(17),
+        .background_color = anim.color(.{
+            .r = anim.value(0.4),
+            .g = anim.value(0.4),
+            .b = anim.value(0.4),
+            .a = anim.value(1),
+        }),
+        .children = .{
+            .{
+                .kind = .view,
+                .display = .flex,
+                .ref = &view_2_a,
+                .flex_basis = anim.value(400.0),
+                .flex_shrink = anim.value(0.0),
+                // .flex_grow = anim.value(0),
+                .margin = anim.value(5),
+                .corner_radius = anim.value(17 - 5),
+                .background_color = anim.color(.{
+                    .r = anim.value(0.9),
+                    .g = anim.value(0.9),
+                    .b = anim.value(0.9),
+                    .a = anim.value(1),
+                }),
+            },
+            .{
+                .kind = .view,
+                .display = .flex,
+                .ref = &view_2_b,
+                .flex_basis = anim.value(400.0),
+                .flex_shrink = anim.value(1.0),
+                .flex_grow = anim.value(0.0),
+                .margin_left = anim.value(50.0),
+                .corner_radius = anim.value(17 - 5),
+                .background_color = anim.color(.{
+                    .r = anim.value(0.01),
+                    .g = anim.value(1.0),
+                    .b = anim.value(0.7),
+                    .a = anim.value(0.75),
+                }),
+            },
         },
     });
-    try le.getAttr(view_2, .corner_radius).setValue(17);
-
-    const view_2_a = try le.appendChild(view_2, .{
-        .kind = .view,
-        .display = .flex,
-        .flex_basis = anim.Value{ .immediate = 400.0 },
-        .flex_shrink = anim.Value{ .immediate = 0.0 },
-        // .flex_grow = anim.Value{ .immediate = 0.0 },
-
-        .background_color = anim.Color{
-            .r = .{ .immediate = 0.9 },
-            .g = .{ .immediate = 0.9 },
-            .b = .{ .immediate = 0.9 },
-            .a = .{ .immediate = 1 },
-        },
-    });
-    try le.getAttr(view_2_a, .margin).setValue(5);
-    try le.getAttr(view_2_a, .corner_radius).setValue(17 - 5);
-
-    const view_2_b = try le.appendChild(view_2, .{
-        .kind = .view,
-        .display = .flex,
-        .flex_basis = anim.Value{ .immediate = 400.0 },
-        .flex_shrink = anim.Value{ .immediate = 1.0 },
-        .flex_grow = anim.Value{ .immediate = 0.0 },
-
-        .margin_left = anim.Value{ .immediate = 50.0 },
-
-        .background_color = anim.Color{
-            .r = .{ .immediate = 0.01 },
-            .g = .{ .immediate = 1.0 },
-            .b = .{ .immediate = 0.7 },
-            .a = .{ .immediate = 0.75 },
-        },
-    });
-    try le.getAttr(view_2_b, .corner_radius).setValue(17);
 
     // const tight_spring = .{
     //     .mass = 1.0,

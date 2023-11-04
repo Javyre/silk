@@ -586,6 +586,20 @@ pub fn getAttr(
     }
 }
 
+test "getAttr().set()" {
+    const alloc = std.testing.allocator;
+
+    // layout engine
+    var le = try Self.init(alloc);
+    defer (le.deinit() catch unreachable);
+
+    try le.getAttr(0, .margin_bottom).set(anim.immediate().value(10.0));
+    try std.testing.expectEqual(
+        @as(f32, 10.0),
+        le.getAttr(0, .margin_bottom).getValue(),
+    );
+}
+
 fn gatherChildrenIndices(
     self: *Self,
     parent: u32,
@@ -784,6 +798,8 @@ pub fn renderFrame(
     // render the tree in a single pass with the proper z-ordering (ignoring
     // siblings).
 
+    // FIXME: we should draw front-to-back to avoid overdraw in the GPU
+    //        backend.
     const slice = self.elements.slice();
     for (
         slice.items(.kind),
@@ -1226,31 +1242,99 @@ fn treeWithRef(maybe_ref: *u32, tree: anytype) typeWithRef(@TypeOf(tree)) {
     }
 }
 
-pub fn appendChildTree(self: *Self, parent: u32, tree: anytype) Err!void {
+fn resolveValueInit(
+    self: *Self,
+    comptime fname: []const u8,
+    val: anytype,
+) !anim.Value {
+    return switch (@TypeOf(val)) {
+        anim.Value => val,
+        anim.ValueSpec => anim.Value.init(self.alloc, &self.animators, val),
+        else => @compileError(
+            fname ++ " must be initialized with either" ++
+                " anim.Value or anim.ValueSpec",
+        ),
+    };
+}
+
+fn resolveColorInit(
+    self: *Self,
+    comptime fname: []const u8,
+    val: anytype,
+) !anim.Color {
+    return switch (@TypeOf(val)) {
+        anim.Color => val,
+        anim.ColorSpec => anim.Color.init(self.alloc, &self.animators, val),
+        else => @compileError(
+            fname ++ " must be initialized with either" ++
+                " anim.Color or anim.ColorSpec",
+        ),
+    };
+}
+
+pub fn appendTreeImpl(
+    self: *Self,
+    ctx: anytype,
+    tree: anytype,
+) Err!void {
     const Tree = @TypeOf(tree);
     var el: Element = .{};
 
+    // direct Element fields
     inline for (comptime std.meta.fieldNames(Element)) |fname| {
-        if (std.meta.fieldIndex(Tree, fname) != null)
-            @field(el, fname) = @field(tree, fname);
+        if (std.meta.fieldIndex(Tree, fname) != null) {
+            if (@TypeOf(@field(el, fname)) == anim.Value) {
+                @field(el, fname) = try self.resolveValueInit(
+                    fname,
+                    @field(tree, fname),
+                );
+            } else if (@TypeOf(@field(el, fname)) == anim.Color) {
+                @field(el, fname) = try self.resolveColorInit(
+                    fname,
+                    @field(tree, fname),
+                );
+            } else {
+                @field(el, fname) = @field(tree, fname);
+            }
+        }
     }
 
-    const el_idx = try self.appendChild(parent, el);
+    // ref field
+    const el_idx = try ctx.insertRoot(el);
     if (std.meta.fieldIndex(Tree, "ref") != null) {
-        std.debug.assert(@TypeOf(tree.ref) == *u32);
+        comptime if (@TypeOf(tree.ref) != *u32)
+            @compileError("ref must be initialized with *u32");
+
         tree.ref.* = el_idx;
     }
 
+    // virtual Element fields
+    // TODO: support non-scalar (Value) virtual attrs (e.g. Color)
+    const virtual_fields =
+        comptime std.meta.fieldNames(@TypeOf(element_attrs.virtual));
+    inline for (virtual_fields) |fname| {
+        if (std.meta.fieldIndex(Tree, fname) != null) {
+            comptime if (@TypeOf(@field(tree, fname)) != anim.ValueSpec)
+                @compileError(
+                    fname ++ " must be initialized with anim.ValueSpec",
+                );
+
+            try self.getAttr(el_idx, @field(Attr, fname))
+                .set(@field(tree, fname));
+        }
+    }
+
+    // children field
     if (std.meta.fieldIndex(Tree, "children") != null) {
         if (tree.children.len > 0) {
-            var ref_store: u32 = undefined;
-            const first_child = treeWithRef(&ref_store, tree.children[0]);
+            var child_ref_store: u32 = undefined;
+            const first_child = treeWithRef(&child_ref_store, tree.children[0]);
 
             try self.appendChildTree(el_idx, first_child);
             var prev_sibling = first_child.ref.*;
 
             inline for (1..tree.children.len) |i| {
-                const child = treeWithRef(&ref_store, tree.children[i]);
+                const child = treeWithRef(&child_ref_store, tree.children[i]);
 
                 try self.appendSiblingTree(prev_sibling, child);
                 prev_sibling = child.ref.*;
@@ -1259,35 +1343,79 @@ pub fn appendChildTree(self: *Self, parent: u32, tree: anytype) Err!void {
     }
 }
 
-pub fn appendSiblingTree(self: *Self, sibling: u32, tree: anytype) Err!void {
-    const Tree = @TypeOf(tree);
-    var el: Element = .{};
-
-    inline for (comptime std.meta.fieldNames(Element)) |fname| {
-        if (std.meta.fieldIndex(Tree, fname) != null)
-            @field(el, fname) = @field(tree, fname);
-    }
-
-    const el_idx = try self.appendSibling(sibling, el);
-    if (std.meta.fieldIndex(Tree, "ref") != null) {
-        std.debug.assert(@TypeOf(tree.ref) == *u32);
-        tree.ref.* = el_idx;
-    }
-
-    if (std.meta.fieldIndex(Tree, "children") != null) {
-        if (tree.children.len > 0) {
-            var ref_store: u32 = undefined;
-            const first_child = treeWithRef(&ref_store, tree.children[0]);
-
-            try self.appendChildTree(el_idx, first_child);
-            var prev_sibling = first_child.ref.*;
-
-            inline for (1..tree.children.len) |i| {
-                const child = treeWithRef(&ref_store, tree.children[i]);
-
-                try self.appendSiblingTree(prev_sibling, child);
-                prev_sibling = child.ref.*;
-            }
+pub fn appendChildTree(self: *Self, parent: u32, tree: anytype) Err!void {
+    return self.appendTreeImpl(struct {
+        le: *Self,
+        parent: u32,
+        fn insertRoot(ctx: @This(), el: Element) Err!u32 {
+            return ctx.le.appendChild(ctx.parent, el);
         }
-    }
+    }{ .le = self, .parent = parent }, tree);
+}
+
+pub fn appendSiblingTree(self: *Self, sibling: u32, tree: anytype) Err!void {
+    return self.appendTreeImpl(struct {
+        le: *Self,
+        sibling: u32,
+        fn insertRoot(ctx: @This(), el: Element) Err!u32 {
+            return ctx.le.appendSibling(ctx.sibling, el);
+        }
+    }{ .le = self, .sibling = sibling }, tree);
+}
+
+test "appendChildTree" {
+    var le = try Self.init(std.testing.allocator);
+    defer (le.deinit() catch unreachable);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var a_ref: u32 = undefined;
+    var a_a_ref: u32 = undefined;
+    var a_b_ref: u32 = undefined;
+    var a_c_ref: u32 = undefined;
+    try le.appendChildTree(0, .{
+        .label = "a",
+        .kind = .view,
+        .ref = &a_ref,
+        // direct attr
+        .margin_bottom = anim.immediate().value(10.0),
+        // virtual attr
+        .padding = anim.immediate().value(20.0),
+        .children = .{
+            .{ .label = "a.a", .kind = .view, .ref = &a_a_ref },
+            .{ .label = "a.b", .kind = .view, .ref = &a_b_ref },
+            .{ .label = "a.c", .kind = .view, .ref = &a_c_ref },
+        },
+    });
+    try std.testing.expectEqualStrings(
+        \\(root)
+        \\└─ (a)
+        \\   ├─ (a.a)
+        \\   ├─ (a.b)
+        \\   └─ (a.c)
+    ,
+        try le.dumpTree(arena.allocator(), .{}),
+    );
+
+    try std.testing.expectEqual(
+        @as(f32, 10.0),
+        le.getAttr(a_ref, .margin_bottom).getValue(),
+    );
+    try std.testing.expectEqual(
+        @as(f32, 20.0),
+        le.getAttr(a_ref, .padding_top).getValue(),
+    );
+    try std.testing.expectEqual(
+        @as(f32, 20.0),
+        le.getAttr(a_ref, .padding_bottom).getValue(),
+    );
+    try std.testing.expectEqual(
+        @as(f32, 20.0),
+        le.getAttr(a_ref, .padding_left).getValue(),
+    );
+    try std.testing.expectEqual(
+        @as(f32, 20.0),
+        le.getAttr(a_ref, .padding_right).getValue(),
+    );
 }
