@@ -427,6 +427,31 @@ fn loadGlyphBandSements(
         points: []@Vector(2, f32),
         points_base_idx: u32,
 
+        fn getTightBounds(
+            ctx: *@This(),
+            comptime axis_: geo.Axis,
+            idx: u32,
+        ) [5]f32 {
+            const axis__ = @intFromEnum(axis_);
+            const p = ctx.points;
+            const b = ctx.points_base_idx;
+
+            const p0 = p[idx - b][axis__];
+            const p1 = p[idx - b + 1][axis__];
+            const p2 = p[idx - b + 2][axis__];
+
+            // midpoints
+            const e1 = (p1 + p0) / 2;
+            const e2 = (p2 + p1) / 2;
+
+            // midpoints of midpoints
+            const m1 = (p0 + e1) / 2;
+            const m2 = (e1 + e2) / 2;
+            const m3 = (e2 + p2) / 2;
+
+            return .{ p0, m1, m2, m3, p2 };
+        }
+
         fn curveBound(
             comptime minmax: enum { min, max },
         ) fn (comptime geo.Axis) fn (*@This(), u32) f32 {
@@ -438,18 +463,11 @@ fn loadGlyphBandSements(
 
             return struct {
                 fn ff(comptime axis_: geo.Axis) fn (*Ctx, u32) f32 {
-                    const axis__ = @intFromEnum(axis_);
-
                     return struct {
                         fn f(ctx: *Ctx, idx: u32) f32 {
-                            const p = ctx.points;
                             return minmax_(
                                 f32,
-                                &.{
-                                    p[idx - ctx.points_base_idx][axis__],
-                                    p[idx - ctx.points_base_idx + 1][axis__],
-                                    p[idx - ctx.points_base_idx + 2][axis__],
-                                },
+                                &ctx.getTightBounds(axis_, idx),
                                 {},
                                 std.sort.asc(f32),
                             ) orelse unreachable;
