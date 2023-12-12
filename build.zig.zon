@@ -11,5 +11,9 @@
             .url = "https://pkg.machengine.org/mach-core/13a84a917c6af2f1f14ab78e0a006e43f5d6b0b5.tar.gz",
             .hash = "12200d39f58e94a4727811fd3e47ac08f0cc90e6533c49deab81fe9f28f2ee11dba1",
         },
+        .mach_freetype = .{
+            .url = "https://pkg.machengine.org/mach-freetype/a6d971285dfe731e49f82e81c81da2b7f5c6a442.tar.gz",
+            .hash = "1220e0de43cacb583b8f9efddcbe359398cfca17a39e265b56c8f2a10314eb8f7a5f",
+        },
     },
 }

@@ -129,7 +129,7 @@ pub fn draw(
     };
     defer output_view.release();
 
-    const win_dims = geo.ScreenDims{ .dims = .{
+    const out_dims = geo.ScreenDims{ .dims = .{
         @floatFromInt(output.getWidth()),
         @floatFromInt(output.getHeight()),
     } };
@@ -152,7 +152,7 @@ pub fn draw(
 
     var v_idx: u16 = 0;
     for (rects) |rect| {
-        v_idx += self.writeRect(v_idx, vb, ib, win_dims, rect) catch |err| {
+        v_idx += self.writeRect(v_idx, vb, ib, out_dims, rect) catch |err| {
             std.log.err("Failed to write rect: {}", .{err});
             break;
         };
@@ -187,13 +187,13 @@ fn writeRect(
     v_idx: u16,
     vb: anytype,
     ib: anytype,
-    win_dims: geo.ScreenDims,
+    out_dims: geo.ScreenDims,
     rect: geo.Rect,
 ) !u16 {
     if (rect.radius.isZero()) {
-        return self.writeRectSimple(v_idx, vb, ib, win_dims, rect);
+        return self.writeRectSimple(v_idx, vb, ib, out_dims, rect);
     } else {
-        return self.writeRectRounded(v_idx, vb, ib, win_dims, rect);
+        return self.writeRectRounded(v_idx, vb, ib, out_dims, rect);
     }
 }
 
@@ -202,27 +202,27 @@ fn writeRectSimple(
     v_idx: u16,
     vb: anytype,
     ib: anytype,
-    win_dims: geo.ScreenDims,
+    out_dims: geo.ScreenDims,
     rect: geo.Rect,
 ) !u16 {
     _ = self;
     try vb.writeStruct(Vertex{
-        .position = win_dims.normalize(rect.origin),
+        .position = out_dims.normalize(rect.origin),
         .normal = .{ 0, 0 },
         .color = rect.color,
     });
     try vb.writeStruct(Vertex{
-        .position = win_dims.normalize(rect.origin + geo.Vec2{ rect.size[0], 0 }),
+        .position = out_dims.normalize(rect.origin + geo.Vec2{ rect.size[0], 0 }),
         .normal = .{ 0, 0 },
         .color = rect.color,
     });
     try vb.writeStruct(Vertex{
-        .position = win_dims.normalize(rect.origin + rect.size),
+        .position = out_dims.normalize(rect.origin + rect.size),
         .normal = .{ 0, 0 },
         .color = rect.color,
     });
     try vb.writeStruct(Vertex{
-        .position = win_dims.normalize(rect.origin + geo.Vec2{ 0, rect.size[1] }),
+        .position = out_dims.normalize(rect.origin + geo.Vec2{ 0, rect.size[1] }),
         .normal = .{ 0, 0 },
         .color = rect.color,
     });
@@ -242,7 +242,7 @@ fn writeRectRounded(
     v_idx: u16,
     vb: anytype,
     ib: anytype,
-    win_dims: geo.ScreenDims,
+    out_dims: geo.ScreenDims,
     rect: geo.Rect,
 ) !u16 {
     _ = self;
@@ -255,7 +255,7 @@ fn writeRectRounded(
 
     // center point
     try vb.writeStruct(Vertex{
-        .position = win_dims.normalize(
+        .position = out_dims.normalize(
             rect.origin + (rect.size / @as(geo.Vec2, @splat(2))),
         ),
         .normal = .{ 0, 0 },
@@ -353,14 +353,14 @@ fn writeRectRounded(
             const pos = arc_origin + radius * normal;
 
             try vb.writeStruct(Vertex{
-                .position = win_dims.normalize(pos),
-                .normal = win_dims.normalize_delta(geo.Vec2{ -1, -1 } * normal),
+                .position = out_dims.normalize(pos),
+                .normal = out_dims.normalize_delta(geo.Vec2{ -1, -1 } * normal),
                 .color = rect.color,
             });
 
             try vb.writeStruct(Vertex{
-                .position = win_dims.normalize(pos),
-                .normal = win_dims.normalize_delta(normal),
+                .position = out_dims.normalize(pos),
+                .normal = out_dims.normalize_delta(normal),
                 .color = transparent,
             });
         }

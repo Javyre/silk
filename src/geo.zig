@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const Axis = enum(u1) { x = 0, y = 1 };
+
 // (x, y) or (w, h)
 pub const Vec2 = @Vector(2, f32);
 // (x, y, z, w) or (r, g, b, a)
@@ -8,6 +10,7 @@ pub const Vec4 = @Vector(4, f32);
 pub const ScreenDims = struct {
     dims: Vec2,
 
+    /// From screen space to NDC
     pub fn normalize(self: ScreenDims, p: Vec2) Vec2 {
         return ( //
             ((@as(Vec2, @splat(2)) * p / self.dims) -
@@ -15,6 +18,7 @@ pub const ScreenDims = struct {
         );
     }
 
+    /// From screen space delta to NDC delta
     pub fn normalize_delta(self: ScreenDims, p: Vec2) Vec2 {
         return ( //
             (@as(Vec2, @splat(2)) * p / self.dims) * @as(Vec2, .{ 1, -1 }) //

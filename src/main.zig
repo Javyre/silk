@@ -29,7 +29,7 @@ pub fn init(app: *App) !void {
     app.gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
     const alloc = app.gpa.allocator();
-    const render_engine = RenderEngine.init(alloc);
+    const render_engine = try RenderEngine.init(alloc);
     var layout_engine = try LayoutEngine.init(alloc);
     const le = &layout_engine;
 
@@ -249,7 +249,14 @@ pub fn update(app: *App) !bool {
 
     try app.layout_engine.flushLayout();
     try app.layout_engine.renderFrame(&app.render_engine);
-    app.render_engine.flushScene(back_buffer);
+    const font = try app.render_engine.text_pass.getOrLoadFont("Georgia");
+    try app.render_engine.writeText(
+        .{ 50, 50 },
+        "gHello, world!\ntesting testing blablabla...",
+        font,
+        62 * 16,
+    );
+    try app.render_engine.flushScene(back_buffer);
 
     core.swap_chain.present();
     back_buffer.release();
