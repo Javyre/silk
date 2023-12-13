@@ -329,6 +329,7 @@ fn readGlyphOutline(
     points: *std.ArrayList(@Vector(2, f32)),
     points_base_idx: u32,
     curves: *std.ArrayList(u32),
+    reverse_fill: bool,
 ) !void {
     const DecomposeCtx = struct {
         points: *std.ArrayList(@Vector(2, f32)),
@@ -349,7 +350,7 @@ fn readGlyphOutline(
                 @as(f32, @floatFromInt(to.y)) / ctx.upem,
             };
 
-            const midpoint = p0 + (p2 - p0) / geo.Vec2{ 2, 2 };
+            const midpoint = (p2 + p0) / geo.Vec2{ 2, 2 };
 
             try ctx.points.append(midpoint);
             try ctx.points.append(p2);
@@ -405,6 +406,24 @@ fn readGlyphOutline(
         .shift = 0,
         .delta = 0,
     });
+
+    if (reverse_fill) {
+        // Reverse the order of the points.
+        // This is to support PostScript/OTF fonts which use
+        // counter-clockwise winding for the glyph outlines.
+        std.mem.reverse(geo.Vec2, points.items);
+        const points_len = @as(u32, @intCast(points.items.len));
+        for (curves.items) |*curve| {
+            // idx relative to only the points in the glyph.
+            const old_curve_idx = curve.* - points_base_idx;
+
+            // -2 to point to the last point in the curve that is now the new
+            // first point.
+            const new_curve_idx = points_len - old_curve_idx - 1 - 2;
+
+            curve.* = points_base_idx + new_curve_idx;
+        }
+    }
 }
 
 fn loadGlyphBandSements(
@@ -623,13 +642,6 @@ fn loadGlyph(
             font.ft_face.styleName() orelse "(null)",
         });
     }
-    if (flags.reverse_fill) {
-        std.log.warn("Glyph {x} in {s} {s} has counter-clockwise fill. This is currently unsupported", .{
-            key.glyph_index,
-            font.ft_face.familyName() orelse "(null)",
-            font.ft_face.styleName() orelse "(null)",
-        });
-    }
 
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
@@ -641,7 +653,14 @@ fn loadGlyph(
 
     const upem: f32 = @floatFromInt(font.ft_face.unitsPerEM());
 
-    try readGlyphOutline(outline, upem, &points, points_base_idx, &curves);
+    try readGlyphOutline(
+        outline,
+        upem,
+        &points,
+        points_base_idx,
+        &curves,
+        flags.reverse_fill,
+    );
     try self.g_glyph_points.write(points.items);
 
     // NOTE: starting here we can mutate `points` as it's

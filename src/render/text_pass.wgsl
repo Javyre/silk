@@ -1,7 +1,7 @@
 // Some parts taken from https://github.com/GreenLightning/gpu-font-rendering/
 
 override show_control_points: bool = false;
-override show_segments: bool = true;
+override show_segments: bool = false;
 override show_em_uv: bool = false;
 
 /// The control points of the glyphs in contour order.
