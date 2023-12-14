@@ -7,6 +7,7 @@ const c = @cImport({
 });
 
 const geo = @import("../geo.zig");
+const bezier = @import("bezier.zig");
 const buffer_writer = @import("buffer_writer.zig");
 const GArrayList = buffer_writer.GArrayList;
 
@@ -381,15 +382,31 @@ fn readGlyphOutline(
             ctrl2: freetype.Vector,
             to: freetype.Vector,
         ) !void {
-            _ = ctx;
-            _ = ctrl1;
-            _ = ctrl2;
-            _ = to;
+            const cubic = [4]geo.Vec2{ ctx.points.getLast(), .{
+                @as(f32, @floatFromInt(ctrl1.x)) / ctx.upem,
+                @as(f32, @floatFromInt(ctrl1.y)) / ctx.upem,
+            }, .{
+                @as(f32, @floatFromInt(ctrl2.x)) / ctx.upem,
+                @as(f32, @floatFromInt(ctrl2.y)) / ctx.upem,
+            }, .{
+                @as(f32, @floatFromInt(to.x)) / ctx.upem,
+                @as(f32, @floatFromInt(to.y)) / ctx.upem,
+            } };
 
-            std.log.err("Cubic curves are currently unsupported", .{});
+            const max_parts = 8;
+            var points_store: [max_parts * 2 + 1]geo.Vec2 = undefined;
+            const quadratic = bezier.cubic_to_quadratic(&points_store, cubic, 1e-3);
 
-            // TODO: convert cubic to quadratic to support PostScript/OTF fonts.
-            return freetype.Error.CannotRenderGlyph;
+            const new_points = quadratic[1..];
+            for (0..new_points.len / 2) |i| {
+                try ctx.points.append(new_points[2 * i]);
+                try ctx.points.append(new_points[2 * i + 1]);
+                try ctx.curves.append(
+                    @intCast(ctx.points_base_idx + ctx.points.items.len - 3),
+                );
+            }
+            std.debug.print("cubic = {d:.4}\n", .{cubic});
+            std.debug.print("quadratic = {d:.4}\n", .{quadratic});
         }
     };
     var decompose_ctx = DecomposeCtx{
