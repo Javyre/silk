@@ -395,7 +395,7 @@ fn readGlyphOutline(
 
             const max_parts = 8;
             var points_store: [max_parts * 2 + 1]geo.Vec2 = undefined;
-            const quadratic = bezier.cubic_to_quadratic(&points_store, cubic, 1e-3);
+            const quadratic = bezier.cubic_to_quadratic(&points_store, cubic, 1e-4);
 
             const new_points = quadratic[1..];
             for (0..new_points.len / 2) |i| {
