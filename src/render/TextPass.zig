@@ -450,6 +450,9 @@ fn loadGlyphBandSements(
     points: []geo.Vec2,
     points_base_idx: u32,
 ) !void {
+    if (curves.len == 0)
+        return;
+
     const coaxis = switch (axis) {
         .x => .y,
         .y => .x,
