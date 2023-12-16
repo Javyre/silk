@@ -16,6 +16,8 @@ const Self = @This();
 
 const MAX_GLYPH_POINT_COUNT = 128 * 1024;
 const MAX_GLYPH_BAND_SEGMENT_COUNT = 1024;
+const MAX_GLYPH_AXIS_BANDS = 12;
+const MAX_GLYPH_BAND_HEIGHT = 1.0 / @as(f32, @floatFromInt(MAX_GLYPH_AXIS_BANDS));
 const MAX_GLYPH_BANDS_DISPLAYED_COUNT = 1024;
 const CURVES_PER_SEGMENT = 8;
 
@@ -568,12 +570,24 @@ fn loadGlyphBandSements(
                 SortCtx.ascMax(axis),
             ) orelse unreachable);
 
+        // Sample disk per pixel is slightly larger than 1 pixel for antialiasing.
+        // To compensate for this, we add an inset to each band to make sure we
+        // have enough information in each.
+        //
+        // This avoids inaccuracy for pixels on the edge of a band not being
+        // aware of their sample disk's coverage of a curve technically outside
+        // the bounds of the band.
+        const band_inset = 0.008;
+
         i += 1;
 
         if ((!have_next_curve) or
             ((band_curves.len >= CURVES_PER_SEGMENT) and
-            (band_axis_end - band_axis_begin > 0.025)))
+            (band_axis_end - band_axis_begin >= MAX_GLYPH_BAND_HEIGHT)))
         {
+            // inset to the bottom of this band.
+            if (have_next_curve) band_axis_end -= band_inset;
+
             // commit our band.
 
             const band_coaxis_begin = SortCtx.min(coaxis)(&sort_ctx, std.sort.min(
@@ -619,7 +633,9 @@ fn loadGlyphBandSements(
                     u32, band_curves, &sort_ctx, SortCtx.ascMax(axis));
 
                 i -= for (band_curves, 0..) |bc, k| {
-                    if (SortCtx.max(axis)(&sort_ctx, bc) > band_axis_end)
+                    // inset to the top of the next band
+                    if (SortCtx.max(axis)(&sort_ctx, bc) >
+                        band_axis_end - band_inset)
                         break @as(u16, @intCast(band_curves.len - k));
                 } else 0;
             }
@@ -805,7 +821,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
                 const segment_em_padding = segment_px_padding / ppem;
 
                 // convert em-space coords to screen-space:
-                const ss_top_left = (cursor + offset) * ppem + (geo.Vec2{
+                const ss_top_left = @floor((cursor + offset) * ppem) + (geo.Vec2{
                     segment.top_left[0],
                     1 - segment.top_left[1],
                 } * ppem) - segment_px_padding;
@@ -818,7 +834,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
                     (segment_em_padding * geo.Vec2{ 2, 2 });
 
                 try self.g_band_segments.writeOne(.{
-                    .top_left = out_dims.normalize(@floor(ss_top_left)),
+                    .top_left = out_dims.normalize(ss_top_left),
                     .size = out_dims.normalize_delta(ss_size),
                     .em_window_top_left = em_window_top_left,
                     .em_window_size = em_window_size,
