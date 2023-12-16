@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("mach-core");
 const gpu = core.gpu;
 const freetype = @import("mach-freetype");
+const harfbuzz = @import("mach-harfbuzz");
 const c = @cImport({
     @cInclude("fontconfig/fontconfig.h");
 });
@@ -405,8 +406,6 @@ fn readGlyphOutline(
                     @intCast(ctx.points_base_idx + ctx.points.items.len - 3),
                 );
             }
-            std.debug.print("cubic = {d:.4}\n", .{cubic});
-            std.debug.print("quadratic = {d:.4}\n", .{quadratic});
         }
     };
     var decompose_ctx = DecomposeCtx{
@@ -591,7 +590,6 @@ fn loadGlyphBandSements(
             ) orelse unreachable);
 
             const first_curve_idx = self.g_band_segment_curves.getLen();
-            std.debug.print("band_curves: {any}\n", .{band_curves});
             try self.g_band_segment_curves.write(band_curves);
 
             try self.loaded_glyph_band_segments.append(.{
@@ -746,84 +744,94 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
 
     self.g_band_segments.clear();
 
+    const hb_buffer = harfbuzz.Buffer.init() orelse return error.OutOfMemory;
+
     for (texts) |text| {
-        // TODO: first shape with harfbuzz to get the glyph indices and positions.
+        // TODO: font size should be in pt per EM.
+        // Pixels Per EM
+        const ppem: geo.Vec2 = @splat(text.font_size);
 
         const font = &self.loaded_fonts.values()[text.font_idx];
-        try font.ft_face.setPixelSizes(0, @intFromFloat(text.font_size));
-        const glyph_index = font.ft_face.getCharIndex(text.text[0]) orelse 0;
+        hb_buffer.reset();
+        hb_buffer.addUTF8(text.text, 0, null);
+        // TODO: allow specifying direction/script/language
+        hb_buffer.guessSegmentProps();
 
-        // Get or load the glyph outline.
-        const glyph_band_segments = try self.getOrLoadGlyph(.{
-            .font_idx = text.font_idx,
-            .glyph_index = glyph_index,
-        });
+        const hb_face = harfbuzz.Face.fromFreetypeFace(font.ft_face);
+        const hb_font = harfbuzz.Font.init(hb_face);
+        // 64ths of an em.
+        hb_font.setScale(64, 64);
 
-        const band_segments = glyph_band_segments.slice(
-            self.loaded_glyph_band_segments.items,
-        );
-        // SPONGE
-        const scale: geo.Vec2 = @splat(text.font_size);
-        for (0..band_segments.len) |i| {
-            const segment = band_segments[band_segments.len - i - 1];
+        hb_font.shape(hb_buffer, null);
 
-            // extend the segment by a bit on each side to avoid
-            // clipping the glyph's antialiased curves.
-            const segment_px_padding = switch (segment.band_axis) {
-                .x => geo.Vec2{ 0, 0.5 },
-                .y => geo.Vec2{ 0.5, 0 },
+        var cursor = text.pos / ppem;
+        for (
+            hb_buffer.getGlyphInfos(),
+            hb_buffer.getGlyphPositions().?,
+        ) |glyph_info, glyph_pos| {
+            const advance = geo.Vec2{
+                @as(f32, @floatFromInt(glyph_pos.x_advance)) /
+                    @as(f32, 64),
+                -@as(f32, @floatFromInt(glyph_pos.y_advance)) /
+                    @as(f32, 64),
             };
-            const segment_em_padding = segment_px_padding / scale;
+            const offset = geo.Vec2{
+                @as(f32, @floatFromInt(glyph_pos.x_offset)) /
+                    @as(f32, 64),
+                -@as(f32, @floatFromInt(glyph_pos.y_offset)) /
+                    @as(f32, 64),
+            };
+            const glyph_index = glyph_info.codepoint;
 
-            // convert em-space coords to screen-space:
-            const ss_top_left = text.pos + (geo.Vec2{
-                segment.top_left[0],
-                1 - segment.top_left[1],
-            } * scale) - segment_px_padding;
-            const ss_size = (segment.size * scale) +
-                (segment_px_padding * geo.Vec2{ 2, 2 });
-
-            const em_window_top_left = segment.top_left -
-                (segment_em_padding * geo.Vec2{ 1, -1 });
-            const em_window_size = segment.size +
-                (segment_em_padding * geo.Vec2{ 2, 2 });
-
-            try self.g_band_segments.writeOne(.{
-                .top_left = out_dims.normalize(ss_top_left),
-                .size = out_dims.normalize_delta(ss_size),
-                .em_window_top_left = em_window_top_left,
-                .em_window_size = em_window_size,
-                .segment_begin = switch (segment.band_axis) {
-                    .x => -@as(i32, @intCast(segment.segment_begin)),
-                    .y => @intCast(segment.segment_begin),
-                },
-                .segment_length = segment.segment_length,
+            // Get or load the glyph outline.
+            const glyph_band_segments = try self.getOrLoadGlyph(.{
+                .font_idx = text.font_idx,
+                .glyph_index = glyph_index,
             });
-        }
 
-        // try font.ft_face.loadGlyph(glyph_index, .{ .no_bitmap = true });
-        //
-        // const glyph = font.ft_face.glyph();
-        // const metrics = glyph.metrics();
-        // const bearing = geo.Vec2{
-        //     @as(f32, @floatFromInt(metrics.horiBearingX)) /
-        //         @as(f32, @floatFromInt(2 << 6)),
-        //     -@as(f32, @floatFromInt(metrics.horiBearingY)) /
-        //         @as(f32, @floatFromInt(2 << 6)),
-        // };
-        // const top_left = text.pos + bearing;
-        // try instanceb.writeStruct(BandSegmentInstance{
-        //     // .glyph_first_contour = glyph_contours.begin,
-        //     // .glyph_contour_count = glyph_contours.len,
-        //     .segment_begin = segment_begin,
-        //     .top_left = out_dims.normalize(top_left),
-        //     .size = out_dims.normalize_delta(geo.Vec2{
-        //         @as(f32, @floatFromInt(metrics.width)) /
-        //             @as(f32, @floatFromInt(2 << 6)),
-        //         -@as(f32, @floatFromInt(metrics.height)) /
-        //             @as(f32, @floatFromInt(2 << 6)),
-        //     }),
-        // });
+            const band_segments = glyph_band_segments.slice(
+                self.loaded_glyph_band_segments.items,
+            );
+
+            for (0..band_segments.len) |i| {
+                const segment = band_segments[band_segments.len - i - 1];
+
+                // extend the segment by a bit on each side to avoid
+                // clipping the glyph's antialiased curves.
+                const segment_px_padding = switch (segment.band_axis) {
+                    .x => geo.Vec2{ 0, 1.0 },
+                    .y => geo.Vec2{ 1.0, 0 },
+                };
+                const segment_em_padding = segment_px_padding / ppem;
+
+                // convert em-space coords to screen-space:
+                const ss_top_left = (cursor + offset) * ppem + (geo.Vec2{
+                    segment.top_left[0],
+                    1 - segment.top_left[1],
+                } * ppem) - segment_px_padding;
+                const ss_size = (segment.size * ppem) +
+                    (segment_px_padding * geo.Vec2{ 2, 2 });
+
+                const em_window_top_left = segment.top_left -
+                    (segment_em_padding * geo.Vec2{ 1, -1 });
+                const em_window_size = segment.size +
+                    (segment_em_padding * geo.Vec2{ 2, 2 });
+
+                try self.g_band_segments.writeOne(.{
+                    .top_left = out_dims.normalize(@floor(ss_top_left)),
+                    .size = out_dims.normalize_delta(ss_size),
+                    .em_window_top_left = em_window_top_left,
+                    .em_window_size = em_window_size,
+                    .segment_begin = switch (segment.band_axis) {
+                        .x => -@as(i32, @intCast(segment.segment_begin)),
+                        .y => @intCast(segment.segment_begin),
+                    },
+                    .segment_length = segment.segment_length,
+                });
+            }
+
+            cursor += advance;
+        }
     }
 
     const seg_insts = self.g_band_segments.getLen();
