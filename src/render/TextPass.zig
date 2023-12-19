@@ -25,13 +25,13 @@ ft_library: freetype.Library,
 fc_config: *c.FcConfig,
 loaded_fonts: std.StringArrayHashMap(Font),
 
-loaded_glyph_band_segments: std.ArrayList(BandSegment),
-loaded_glyphs: std.AutoArrayHashMap(LoadedGlyphKey, BandSegmentSlice),
+loaded_glyph_windows: std.ArrayList(GlyphWindow),
+loaded_glyphs: std.AutoArrayHashMap(LoadedGlyphKey, GlyphWindowSlice),
 
 pipeline: *gpu.RenderPipeline,
 g_glyph_points: GArrayList(@Vector(2, f32)),
 g_band_segment_curves: GArrayList(u32),
-g_band_segments: GArrayList(BandSegmentInstance),
+g_glyph_windows: GArrayList(GGlyphWindow),
 glyph_data_bgroup: *gpu.BindGroup,
 
 alloc: std.mem.Allocator,
@@ -42,8 +42,8 @@ const BandSegment = struct {
     top_left: geo.Vec2,
     size: geo.Vec2,
     band_axis: geo.Axis,
-    segment_begin: u32,
-    segment_length: u32,
+    curves_begin: u32,
+    curves_length: u16,
 };
 
 const LoadedGlyphKey = struct {
@@ -51,63 +51,82 @@ const LoadedGlyphKey = struct {
     glyph_index: u32,
 };
 
-const BandSegmentSlice = packed struct {
+const GlyphWindowSlice = packed struct {
     begin: u16,
     len: u16,
 
-    fn slice(s: @This(), segments: []BandSegment) []BandSegment {
-        return segments[s.begin..][0..s.len];
+    fn slice(s: @This(), windows: []GlyphWindow) []GlyphWindow {
+        return windows[s.begin..][0..s.len];
     }
 };
 
-const BandSegmentInstance = packed struct {
+// TODO: have a single quad that figures out it's bands in the fragment shader.
+// (i.e. band_idx = int(x % 0.1))
+const GlyphWindow = struct {
+    em_window_top_left: geo.Vec2,
+    em_window_size: geo.Vec2,
+
+    vert_curves_begin: u32,
+    hori_curves_begin: u32,
+    vh_curves_lengths: packed struct(u32) {
+        hori: u16,
+        vert: u16,
+    },
+};
+
+const GGlyphWindow = packed struct {
     top_left: geo.Vec2,
     size: geo.Vec2,
 
     em_window_top_left: geo.Vec2,
     em_window_size: geo.Vec2,
 
-    // Index to the glyph in the storage buffer
-    // negative: segment is part of a vertical band.
-    // positive: segment is part of a horizontal band.
-    // absolute value: idx of the of the idx of the first curve in the band segment.
-    segment_begin: i32,
-    segment_length: u32,
+    vert_curves_begin: u32,
+    hori_curves_begin: u32,
+    vh_curves_lengths: packed struct(u32) {
+        hori: u16,
+        vert: u16,
+    },
 
     fn bufferLayout() gpu.VertexBufferLayout {
         return gpu.VertexBufferLayout.init(.{
-            .array_stride = @sizeOf(BandSegmentInstance),
+            .array_stride = @sizeOf(GGlyphWindow),
             .step_mode = .instance,
             .attributes = &.{
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(BandSegmentInstance, "top_left"),
+                    .offset = @offsetOf(GGlyphWindow, "top_left"),
                     .shader_location = 0,
                 },
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(BandSegmentInstance, "size"),
+                    .offset = @offsetOf(GGlyphWindow, "size"),
                     .shader_location = 1,
                 },
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(BandSegmentInstance, "em_window_top_left"),
+                    .offset = @offsetOf(GGlyphWindow, "em_window_top_left"),
                     .shader_location = 2,
                 },
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(BandSegmentInstance, "em_window_size"),
+                    .offset = @offsetOf(GGlyphWindow, "em_window_size"),
                     .shader_location = 3,
                 },
                 gpu.VertexAttribute{
-                    .format = .sint32,
-                    .offset = @offsetOf(BandSegmentInstance, "segment_begin"),
+                    .format = .uint32,
+                    .offset = @offsetOf(GGlyphWindow, "vert_curves_begin"),
                     .shader_location = 4,
                 },
                 gpu.VertexAttribute{
                     .format = .uint32,
-                    .offset = @offsetOf(BandSegmentInstance, "segment_length"),
+                    .offset = @offsetOf(GGlyphWindow, "hori_curves_begin"),
                     .shader_location = 5,
+                },
+                gpu.VertexAttribute{
+                    .format = .uint32,
+                    .offset = @offsetOf(GGlyphWindow, "vh_curves_lengths"),
+                    .shader_location = 6,
                 },
             },
         });
@@ -157,8 +176,8 @@ pub fn init(alloc: std.mem.Allocator) !Self {
     // To avoid curve index 0 having an ambiguous sign. (i.e. sign(idx) == 0)
     try g_band_segment_curves.writeOne(NULL_CURVE);
 
-    const g_band_segments = GArrayList(BandSegmentInstance).initCapacity(.{
-        .label = "glyph_band_segments",
+    const g_glyph_windows = GArrayList(GGlyphWindow).initCapacity(.{
+        .label = "glyph_windows",
         .usage = .{ .vertex = true, .copy_dst = true },
         .capacity = MAX_GLYPH_BANDS_DISPLAYED_COUNT,
     });
@@ -230,7 +249,7 @@ pub fn init(alloc: std.mem.Allocator) !Self {
             .module = shader_module,
             .entry_point = "vertex_main",
             .buffers = &.{
-                BandSegmentInstance.bufferLayout(),
+                GGlyphWindow.bufferLayout(),
             },
         }),
         .fragment = &gpu.FragmentState.init(.{
@@ -246,15 +265,15 @@ pub fn init(alloc: std.mem.Allocator) !Self {
         .fc_config = c.FcInitLoadConfigAndFonts() orelse
             return error.FcInitFailed,
         .loaded_fonts = std.StringArrayHashMap(Font).init(alloc),
-        .loaded_glyph_band_segments = std.ArrayList(BandSegment).init(alloc),
+        .loaded_glyph_windows = std.ArrayList(GlyphWindow).init(alloc),
         .loaded_glyphs = std.AutoArrayHashMap(
             LoadedGlyphKey,
-            BandSegmentSlice,
+            GlyphWindowSlice,
         ).init(alloc),
         .pipeline = pipeline,
         .g_glyph_points = g_glyph_points,
         .g_band_segment_curves = g_band_segment_curves,
-        .g_band_segments = g_band_segments,
+        .g_glyph_windows = g_glyph_windows,
         .glyph_data_bgroup = glyph_data_bgroup,
         .alloc = alloc,
     };
@@ -264,14 +283,14 @@ pub fn deinit(self: *Self) !void {
     self.glyph_data_bgroup.release();
     self.g_glyph_points.deinit();
     self.g_band_segment_curves.deinit();
-    self.g_band_segments.deinit();
+    self.g_glyph_windows.deinit();
 
     c.FcConfigDestroy(self.fc_config);
     c.FcFini();
     self.ft_library.deinit();
     self.loaded_fonts.deinit();
     self.loaded_glyphs.deinit();
-    self.loaded_glyph_band_segments.deinit();
+    self.loaded_glyph_windows.deinit();
 
     self.* = undefined;
 }
@@ -444,19 +463,35 @@ fn readGlyphOutline(
     }
 }
 
-fn loadGlyphBandSements(
+fn loadGlyphBandSegments(
     self: *Self,
     comptime axis: geo.Axis,
     curves: []u32,
     points: []geo.Vec2,
     points_base_idx: u32,
-) !void {
+    band_segment_store: []BandSegment,
+) ![]BandSegment {
     if (curves.len == 0)
-        return;
+        return band_segment_store[0..0];
 
     const coaxis = switch (axis) {
         .x => .y,
         .y => .x,
+    };
+
+    var band_segments = struct {
+        items: []BandSegment,
+        capacity: u32,
+
+        fn append(s: *@This(), item: BandSegment) !void {
+            if (s.items.len >= s.capacity)
+                return error.OutOfMemory;
+            s.items.len += 1;
+            s.items[s.items.len - 1] = item;
+        }
+    }{
+        .items = band_segment_store[0..0],
+        .capacity = @intCast(band_segment_store.len),
     };
 
     // Greedy algorithm to partition into band segments:
@@ -577,7 +612,7 @@ fn loadGlyphBandSements(
         // This avoids inaccuracy for pixels on the edge of a band not being
         // aware of their sample disk's coverage of a curve technically outside
         // the bounds of the band.
-        const band_inset = 0.008;
+        const band_inset = 0.01;
 
         i += 1;
 
@@ -606,7 +641,7 @@ fn loadGlyphBandSements(
             const first_curve_idx = self.g_band_segment_curves.getLen();
             try self.g_band_segment_curves.write(band_curves);
 
-            try self.loaded_glyph_band_segments.append(.{
+            band_segments.append(.{
                 .top_left = switch (axis) {
                     .x => geo.Vec2{ band_axis_begin, band_coaxis_end },
                     .y => geo.Vec2{ band_coaxis_begin, band_axis_end },
@@ -621,10 +656,10 @@ fn loadGlyphBandSements(
                         band_axis_end - band_axis_begin,
                     },
                 },
-                .segment_begin = @intCast(first_curve_idx),
-                .segment_length = @intCast(band_curves.len),
+                .curves_begin = @intCast(first_curve_idx),
+                .curves_length = @intCast(band_curves.len),
                 .band_axis = axis,
-            });
+            }) catch unreachable;
 
             if (have_next_curve) {
                 // take back the curves that intersect the next band.
@@ -644,6 +679,8 @@ fn loadGlyphBandSements(
             band_axis_begin = band_axis_end;
         }
     }
+
+    return band_segments.items;
 }
 
 // TODO: make the function instead:
@@ -652,7 +689,7 @@ fn loadGlyphBandSements(
 fn loadGlyph(
     self: *Self,
     key: LoadedGlyphKey,
-) !BandSegmentSlice {
+) !GlyphWindowSlice {
     const font = &self.loaded_fonts.values()[key.font_idx];
     try font.ft_face.loadGlyph(key.glyph_index, .{
         .no_bitmap = true,
@@ -700,23 +737,58 @@ fn loadGlyph(
     // NOTE: starting here we can mutate `points` as it's
     //       already been written to the GPU.
 
-    const first_segment_idx: u16 =
-        @intCast(self.loaded_glyph_band_segments.items.len);
-
     // Vertical Partition:
 
-    try self.loadGlyphBandSements(.x, curves.items, points.items, points_base_idx);
-    try self.loadGlyphBandSements(.y, curves.items, points.items, points_base_idx);
+    var band_segment_store: [MAX_GLYPH_AXIS_BANDS * 2]BandSegment = undefined;
+    const vert_band_segs = try self.loadGlyphBandSegments(
+        .x,
+        curves.items,
+        points.items,
+        points_base_idx,
+        band_segment_store[0..],
+    );
+    const hori_band_segs = try self.loadGlyphBandSegments(
+        .y,
+        curves.items,
+        points.items,
+        points_base_idx,
+        band_segment_store[vert_band_segs.len..],
+    );
 
-    const last_segment_idx: u16 =
-        @intCast(self.loaded_glyph_band_segments.items.len);
+    const first_window_idx: u16 =
+        @intCast(self.loaded_glyph_windows.items.len);
+
+    // windows are intersections between horizontal and vertical bands.
+    try self.loaded_glyph_windows.ensureUnusedCapacity(
+        hori_band_segs.len * vert_band_segs.len,
+    );
+    for (hori_band_segs) |hori_band_seg| {
+        for (vert_band_segs) |vert_band_seg| {
+            try self.loaded_glyph_windows.append(.{
+                .em_window_top_left = .{
+                    @max(hori_band_seg.top_left[0], vert_band_seg.top_left[0]),
+                    @min(hori_band_seg.top_left[1], vert_band_seg.top_left[1]),
+                },
+                .em_window_size = @min(hori_band_seg.size, vert_band_seg.size),
+                .vert_curves_begin = vert_band_seg.curves_begin,
+                .hori_curves_begin = hori_band_seg.curves_begin,
+                .vh_curves_lengths = .{
+                    .hori = hori_band_seg.curves_length,
+                    .vert = vert_band_seg.curves_length,
+                },
+            });
+        }
+    }
+
+    const last_window_idx: u16 =
+        @intCast(self.loaded_glyph_windows.items.len);
     return .{
-        .begin = first_segment_idx,
-        .len = last_segment_idx - first_segment_idx,
+        .begin = first_window_idx,
+        .len = last_window_idx - first_window_idx,
     };
 }
 
-fn getOrLoadGlyph(self: *Self, key: LoadedGlyphKey) !BandSegmentSlice {
+fn getOrLoadGlyph(self: *Self, key: LoadedGlyphKey) !GlyphWindowSlice {
     const gop = try self.loaded_glyphs.getOrPut(key);
     if (gop.found_existing) {
         return gop.value_ptr.*;
@@ -758,7 +830,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
     const pass = encoder.beginRenderPass(&render_pass_info);
     pass.setPipeline(self.pipeline);
 
-    self.g_band_segments.clear();
+    self.g_glyph_windows.clear();
 
     const hb_buffer = harfbuzz.Buffer.init() orelse return error.OutOfMemory;
 
@@ -800,49 +872,46 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
             const glyph_index = glyph_info.codepoint;
 
             // Get or load the glyph outline.
-            const glyph_band_segments = try self.getOrLoadGlyph(.{
+            const glyph_windows = try self.getOrLoadGlyph(.{
                 .font_idx = text.font_idx,
                 .glyph_index = glyph_index,
             });
 
-            const band_segments = glyph_band_segments.slice(
-                self.loaded_glyph_band_segments.items,
+            const windows = glyph_windows.slice(
+                self.loaded_glyph_windows.items,
             );
 
-            for (0..band_segments.len) |i| {
-                const segment = band_segments[band_segments.len - i - 1];
-
-                // extend the segment by a bit on each side to avoid
-                // clipping the glyph's antialiased curves.
-                const segment_px_padding = switch (segment.band_axis) {
-                    .x => geo.Vec2{ 0, 1.0 },
-                    .y => geo.Vec2{ 1.0, 0 },
-                };
-                const segment_em_padding = segment_px_padding / ppem;
+            for (windows) |window| {
+                // TODO: add this back in but during loadGlyph
+                // // extend the segment by a bit on each side to avoid
+                // // clipping the glyph's antialiased curves.
+                // const segment_px_padding = switch (segment.band_axis) {
+                //     .x => geo.Vec2{ 0, 1.0 },
+                //     .y => geo.Vec2{ 1.0, 0 },
+                // };
+                // const segment_em_padding = segment_px_padding / ppem;
 
                 // convert em-space coords to screen-space:
                 const ss_top_left = @floor((cursor + offset) * ppem) + (geo.Vec2{
-                    segment.top_left[0],
-                    1 - segment.top_left[1],
-                } * ppem) - segment_px_padding;
-                const ss_size = (segment.size * ppem) +
-                    (segment_px_padding * geo.Vec2{ 2, 2 });
+                    window.em_window_top_left[0],
+                    1 - window.em_window_top_left[1],
+                } * ppem);
+                const ss_size = window.em_window_size * ppem;
 
-                const em_window_top_left = segment.top_left -
-                    (segment_em_padding * geo.Vec2{ 1, -1 });
-                const em_window_size = segment.size +
-                    (segment_em_padding * geo.Vec2{ 2, 2 });
+                const em_window_top_left = window.em_window_top_left;
+                const em_window_size = window.em_window_size;
 
-                try self.g_band_segments.writeOne(.{
+                try self.g_glyph_windows.writeOne(.{
                     .top_left = out_dims.normalize(ss_top_left),
                     .size = out_dims.normalize_delta(ss_size),
                     .em_window_top_left = em_window_top_left,
                     .em_window_size = em_window_size,
-                    .segment_begin = switch (segment.band_axis) {
-                        .x => -@as(i32, @intCast(segment.segment_begin)),
-                        .y => @intCast(segment.segment_begin),
+                    .vert_curves_begin = window.vert_curves_begin,
+                    .hori_curves_begin = window.hori_curves_begin,
+                    .vh_curves_lengths = .{
+                        .vert = window.vh_curves_lengths.vert,
+                        .hori = window.vh_curves_lengths.hori,
                     },
-                    .segment_length = segment.segment_length,
                 });
             }
 
@@ -850,12 +919,12 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
         }
     }
 
-    const seg_insts = self.g_band_segments.getLen();
+    const seg_insts = self.g_glyph_windows.getLen();
     pass.setVertexBuffer(
         0,
-        self.g_band_segments.getRawBuffer(),
+        self.g_glyph_windows.getRawBuffer(),
         0,
-        seg_insts * @sizeOf(BandSegmentInstance),
+        seg_insts * @sizeOf(GGlyphWindow),
     );
     pass.setBindGroup(0, self.glyph_data_bgroup, null);
     pass.draw(6, @intCast(seg_insts), 0, 0);
