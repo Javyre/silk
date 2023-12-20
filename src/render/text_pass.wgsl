@@ -1,6 +1,6 @@
 // Some parts taken from https://github.com/GreenLightning/gpu-font-rendering/
 
-override show_control_points: bool = true;
+override show_control_points: bool = false;
 override show_segments: bool = false;
 override show_em_uv: bool = false;
 
@@ -94,8 +94,13 @@ fn compute_coverage_for_curve(
     p1: vec2<f32>,
     p2: vec2<f32>,
 ) -> f32 {
-    if (p0.y > 0 && p1.y > 0 && p2.y > 0) { return 0; }
-    if (p0.y < 0 && p1.y < 0 && p2.y < 0) { return 0; }
+    // t0m(A,B,C) = A!(BC) + (!A)B(!C) = A(!B) + B(!C)
+    // t1m(A,B,C) = T0(!A,!B,!C) = (!A)B + (!B)C
+
+    let yp: vec3<bool> = vec3<f32>(p0.y, p1.y, p2.y) > vec3<f32>(0.0);
+    let t0m = (yp.x && !yp.y) || (yp.y && !yp.z);
+    let t1m = (!yp.x && yp.y) || (!yp.y && yp.z);
+    if (!t0m && !t1m) { return 0; }
 
     // NOTE: Simplified from abc formula by extracting a factor of (-2) from b.
     let a = p0 - 2*p1 + p2;
@@ -105,34 +110,28 @@ fn compute_coverage_for_curve(
     var t0 = 0.0;
     var t1 = 0.0;
 
-    if (any(a * b >= vec2f(3e-7))) {
+    if (any(abs(a * b) >= vec2f(3e-7))) {
         // Quadratic segment, solve abc formula to find roots.
         let radicand = b.y*b.y - a.y*c.y;
         if (radicand <= 0) { return 0; }
 
         let s = sqrt(radicand);
-        t0 = (b.y - s) / a.y;
-        t1 = (b.y + s) / a.y;
+        let ainv = 1.0 / a.y;
+        t0 = (b.y - s) * ainv;
+        t1 = (b.y + s) * ainv;
     } else {
-        let t = p0.y / (p0.y - p2.y);
-        if (p0.y < p2.y) {
-            t0 = -1.0;
-            t1 = t;
-        } else {
-            t0 = t;
-            t1 = -1.0;
-        }
+        t0 = p0.y / (p0.y - p2.y);
+        t1 = t0;
     }
 
     var alpha: f32 = 0.0;
-    if (0 <= t0 && t0 < 1) {
-        let x = (a.x*t0 - 2.0*b.x)*t0 + c.x;
-        alpha += clamp(x * inverse_sample_diameter + 0.5, 0.0, 1.0);
+    if (t0m) {
+        let x0 = (a.x*t0 - 2.0*b.x)*t0 + c.x;
+        alpha += clamp(x0 * inverse_sample_diameter + 0.5, 0.0, 1.0);
     }
-
-    if (0 <= t1 && t1 < 1) {
-        let x = (a.x*t1 - 2.0*b.x)*t1 + c.x;
-        alpha -= clamp(x * inverse_sample_diameter + 0.5, 0.0, 1.0);
+    if (t1m) {
+        let x1 = (a.x*t1 - 2.0*b.x)*t1 + c.x;
+        alpha -= clamp(x1 * inverse_sample_diameter + 0.5, 0.0, 1.0);
     }
     return alpha;
 }
