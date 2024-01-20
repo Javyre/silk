@@ -14,24 +14,19 @@ const GArrayList = buffer_writer.GArrayList;
 
 const Self = @This();
 
-const MAX_GLYPH_POINT_COUNT = 128 * 1024;
-const MAX_GLYPH_BAND_SEGMENT_COUNT = 1024;
-const MAX_GLYPH_AXIS_BANDS = 12;
-const MAX_GLYPH_BAND_HEIGHT = 1.0 / @as(f32, @floatFromInt(MAX_GLYPH_AXIS_BANDS));
-const MAX_GLYPH_BANDS_DISPLAYED_COUNT = 1024;
-const CURVES_PER_SEGMENT = 8;
+const MAX_GLYPH_POINT_COUNT = 256;
+const MAX_GLYPHS_LOADED_COUNT = 2048;
+const MAX_GLYPHS_DISPLAYED_COUNT = 1024;
+const MAX_GLYPH_AXIS_BANDS = 8;
 
 ft_library: freetype.Library,
 fc_config: *c.FcConfig,
 loaded_fonts: std.StringArrayHashMap(Font),
-
-loaded_glyph_windows: std.ArrayList(GlyphWindow),
-loaded_glyphs: std.AutoArrayHashMap(LoadedGlyphKey, GlyphWindowSlice),
+loaded_glyphs: std.AutoArrayHashMap(LoadedGlyphKey, u32),
 
 pipeline: *gpu.RenderPipeline,
-g_glyph_points: GArrayList(@Vector(2, f32)),
-g_band_segment_curves: GArrayList(u32),
-g_glyph_windows: GArrayList(GGlyphWindow),
+g_glyph_data: GArrayList(u32),
+g_glyph_instances: GArrayList(GGlyphInstance),
 glyph_data_bgroup: *gpu.BindGroup,
 
 alloc: std.mem.Allocator,
@@ -74,59 +69,117 @@ const GlyphWindow = struct {
     },
 };
 
-const GGlyphWindow = packed struct {
+/// Staging area for loading and writing glyph data to the GPU.
+///
+/// Layout:
+///
+/// GlyphData: { // fields aligned to 4 bytes
+///     info: GlyphInfo,
+///     lengths: GlyphLengths,
+///     vert_band_ends: []u16,
+///     vert_band_curves: []u16,
+///     hori_band_ends: []u16,
+///     hori_band_curves: []u16,
+///     points: []geo.Vec2,
+/// }
+const GGlyphDataBuilder = struct {
+    const ArrayListU16 = std.ArrayListAligned(u16, @alignOf(u32));
+
+    info: ?GlyphInfo = null,
+    /// Amount of curves in each vert band.
+    vert_band_ends: ArrayListU16,
+    vert_band_curves: ArrayListU16,
+    /// Amount of curves in each hori band.
+    hori_band_ends: ArrayListU16,
+    hori_band_curves: ArrayListU16,
+    points: std.ArrayList(geo.Vec2),
+
+    const GlyphInfo = packed struct(u128) {
+        em_window_bottom_left: geo.Vec2,
+        em_window_top_right: geo.Vec2,
+    };
+    const GlyphLengths = packed struct(u32) {
+        /// Amount of vert bands
+        vert_bands_length: u16 = 0,
+        /// Amount of hori bands
+        hori_bands_length: u16 = 0,
+    };
+    comptime {
+        std.debug.assert(@sizeOf(GlyphInfo) == 4 * @sizeOf(u32));
+        std.debug.assert(@sizeOf(GlyphLengths) == 1 * @sizeOf(u32));
+    }
+
+    fn init(alloc: std.mem.Allocator) GGlyphDataBuilder {
+        return .{
+            .info = null,
+            .vert_band_ends = ArrayListU16.init(alloc),
+            .vert_band_curves = ArrayListU16.init(alloc),
+            .hori_band_ends = ArrayListU16.init(alloc),
+            .hori_band_curves = ArrayListU16.init(alloc),
+            .points = std.ArrayList(geo.Vec2).init(alloc),
+        };
+    }
+
+    fn writePadded(
+        src_bytes: []align(@alignOf(u32)) const u8,
+        dest: *GArrayList(u32),
+    ) !void {
+        const remainder = src_bytes.len % @sizeOf(u32);
+        const src_even = src_bytes[0 .. src_bytes.len - remainder];
+        const src_rest = src_bytes[src_bytes.len - remainder ..];
+
+        // aligncast safe since src_bytes is aligned.
+        try dest.write(@alignCast(std.mem.bytesAsSlice(u32, src_even)));
+        if (remainder > 0) {
+            var extra: u32 = 0;
+            @memcpy(std.mem.asBytes(&extra)[0..remainder], src_rest);
+            try dest.writeOne(extra);
+        }
+    }
+
+    fn write(self: *GGlyphDataBuilder, dest: *GArrayList(u32)) !void {
+        const asBytes = std.mem.asBytes;
+        const sliceAsBytes = std.mem.sliceAsBytes;
+
+        const info: *const GlyphInfo =
+            &(self.info orelse return error.InvalidState);
+        try writePadded(asBytes(info), dest);
+        try writePadded(asBytes(&GlyphLengths{
+            .vert_bands_length = @intCast(self.vert_band_ends.items.len),
+            .hori_bands_length = @intCast(self.hori_band_ends.items.len),
+        }), dest);
+        try writePadded(sliceAsBytes(self.vert_band_ends.items), dest);
+        try writePadded(sliceAsBytes(self.vert_band_curves.items), dest);
+        try writePadded(sliceAsBytes(self.hori_band_ends.items), dest);
+        try writePadded(sliceAsBytes(self.hori_band_curves.items), dest);
+        try writePadded(sliceAsBytes(self.points.items), dest);
+    }
+};
+
+const GGlyphInstance = packed struct {
     top_left: geo.Vec2,
-    size: geo.Vec2,
-
-    em_window_top_left: geo.Vec2,
-    em_window_size: geo.Vec2,
-
-    vert_curves_begin: u32,
-    hori_curves_begin: u32,
-    vh_curves_lengths: packed struct(u32) {
-        hori: u16,
-        vert: u16,
-    },
+    scale: geo.Vec2,
+    glyph_data_begin: u32,
 
     fn bufferLayout() gpu.VertexBufferLayout {
         return gpu.VertexBufferLayout.init(.{
-            .array_stride = @sizeOf(GGlyphWindow),
+            .array_stride = @sizeOf(GGlyphInstance),
             .step_mode = .instance,
             .attributes = &.{
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(GGlyphWindow, "top_left"),
+                    .offset = @offsetOf(GGlyphInstance, "top_left"),
                     .shader_location = 0,
                 },
                 gpu.VertexAttribute{
                     .format = .float32x2,
-                    .offset = @offsetOf(GGlyphWindow, "size"),
+                    .offset = @offsetOf(GGlyphInstance, "scale"),
                     .shader_location = 1,
                 },
                 gpu.VertexAttribute{
-                    .format = .float32x2,
-                    .offset = @offsetOf(GGlyphWindow, "em_window_top_left"),
+                    .format = .uint32,
+                    .offset = @offsetOf(GGlyphInstance, "glyph_data_begin"),
                     .shader_location = 2,
-                },
-                gpu.VertexAttribute{
-                    .format = .float32x2,
-                    .offset = @offsetOf(GGlyphWindow, "em_window_size"),
-                    .shader_location = 3,
-                },
-                gpu.VertexAttribute{
-                    .format = .uint32,
-                    .offset = @offsetOf(GGlyphWindow, "vert_curves_begin"),
-                    .shader_location = 4,
-                },
-                gpu.VertexAttribute{
-                    .format = .uint32,
-                    .offset = @offsetOf(GGlyphWindow, "hori_curves_begin"),
-                    .shader_location = 5,
-                },
-                gpu.VertexAttribute{
-                    .format = .uint32,
-                    .offset = @offsetOf(GGlyphWindow, "vh_curves_lengths"),
-                    .shader_location = 6,
                 },
             },
         });
@@ -155,31 +208,21 @@ pub fn init(alloc: std.mem.Allocator) !Self {
     );
     defer shader_module.release();
 
-    var g_glyph_points = GArrayList(@Vector(2, f32)).initCapacity(.{
-        .label = "glyph_points",
+    const avg_glyph_data_size =
+        (@sizeOf(GGlyphDataBuilder.GlyphInfo) +
+        @sizeOf(GGlyphDataBuilder.GlyphLengths) +
+        MAX_GLYPH_POINT_COUNT * @sizeOf(geo.Vec2)) /
+        @sizeOf(u32);
+    var g_glyph_data = GArrayList(u32).initCapacity(.{
+        .label = "g_glyph_data",
         .usage = .{ .storage = true, .copy_dst = true },
-        .capacity = MAX_GLYPH_POINT_COUNT,
+        .capacity = avg_glyph_data_size * MAX_GLYPHS_LOADED_COUNT,
     });
 
-    // Curve at index 0 is a null curve that we use to pad out the
-    // band segment curves buffer.
-    try g_glyph_points.writeOne(.{ -1.0, -1.0 });
-    try g_glyph_points.writeOne(.{ -1.0, -1.0 });
-    try g_glyph_points.writeOne(.{ -1.0, -1.0 });
-
-    var g_band_segment_curves = GArrayList(u32).initCapacity(.{
-        .label = "glyph_band_segment_curves",
-        .usage = .{ .storage = true, .copy_dst = true },
-        .capacity = MAX_GLYPH_BAND_SEGMENT_COUNT * 12, // CURVES_PER_SEGMENT,
-    });
-
-    // To avoid curve index 0 having an ambiguous sign. (i.e. sign(idx) == 0)
-    try g_band_segment_curves.writeOne(NULL_CURVE);
-
-    const g_glyph_windows = GArrayList(GGlyphWindow).initCapacity(.{
-        .label = "glyph_windows",
+    const g_glyph_instances = GArrayList(GGlyphInstance).initCapacity(.{
+        .label = "glyph_instances",
         .usage = .{ .vertex = true, .copy_dst = true },
-        .capacity = MAX_GLYPH_BANDS_DISPLAYED_COUNT,
+        .capacity = MAX_GLYPHS_DISPLAYED_COUNT,
     });
 
     const glyph_data_bgroup_layout = core.device.createBindGroupLayout(
@@ -188,14 +231,7 @@ pub fn init(alloc: std.mem.Allocator) !Self {
             .entries = &.{
                 gpu.BindGroupLayout.Entry.buffer(
                     0,
-                    .{ .fragment = true },
-                    .read_only_storage,
-                    false,
-                    0,
-                ),
-                gpu.BindGroupLayout.Entry.buffer(
-                    1,
-                    .{ .fragment = true },
+                    .{ .vertex = true, .fragment = true },
                     .read_only_storage,
                     false,
                     0,
@@ -209,11 +245,8 @@ pub fn init(alloc: std.mem.Allocator) !Self {
             .layout = glyph_data_bgroup_layout,
             .entries = &.{
                 gpu.BindGroup.Entry.buffer( //
-                    0, g_glyph_points.getRawBuffer(), //
-                    0, g_glyph_points.getSize()),
-                gpu.BindGroup.Entry.buffer( //
-                    1, g_band_segment_curves.getRawBuffer(), //
-                    0, g_band_segment_curves.getSize()),
+                    0, g_glyph_data.getRawBuffer(), //
+                    0, g_glyph_data.getSize()),
             },
         }),
     );
@@ -249,7 +282,7 @@ pub fn init(alloc: std.mem.Allocator) !Self {
             .module = shader_module,
             .entry_point = "vertex_main",
             .buffers = &.{
-                GGlyphWindow.bufferLayout(),
+                GGlyphInstance.bufferLayout(),
             },
         }),
         .fragment = &gpu.FragmentState.init(.{
@@ -265,15 +298,10 @@ pub fn init(alloc: std.mem.Allocator) !Self {
         .fc_config = c.FcInitLoadConfigAndFonts() orelse
             return error.FcInitFailed,
         .loaded_fonts = std.StringArrayHashMap(Font).init(alloc),
-        .loaded_glyph_windows = std.ArrayList(GlyphWindow).init(alloc),
-        .loaded_glyphs = std.AutoArrayHashMap(
-            LoadedGlyphKey,
-            GlyphWindowSlice,
-        ).init(alloc),
+        .loaded_glyphs = std.AutoArrayHashMap(LoadedGlyphKey, u32).init(alloc),
         .pipeline = pipeline,
-        .g_glyph_points = g_glyph_points,
-        .g_band_segment_curves = g_band_segment_curves,
-        .g_glyph_windows = g_glyph_windows,
+        .g_glyph_data = g_glyph_data,
+        .g_glyph_instances = g_glyph_instances,
         .glyph_data_bgroup = glyph_data_bgroup,
         .alloc = alloc,
     };
@@ -281,16 +309,14 @@ pub fn init(alloc: std.mem.Allocator) !Self {
 pub fn deinit(self: *Self) !void {
     self.pipeline.release();
     self.glyph_data_bgroup.release();
-    self.g_glyph_points.deinit();
-    self.g_band_segment_curves.deinit();
-    self.g_glyph_windows.deinit();
+    self.g_glyph_data.deinit();
+    self.g_glyph_instances.deinit();
 
     c.FcConfigDestroy(self.fc_config);
     c.FcFini();
     self.ft_library.deinit();
     self.loaded_fonts.deinit();
     self.loaded_glyphs.deinit();
-    self.loaded_glyph_windows.deinit();
 
     self.* = undefined;
 }
@@ -349,15 +375,13 @@ pub fn getOrLoadFont(self: *Self, name: [:0]const u8) !u16 {
 fn readGlyphOutline(
     outline: freetype.Outline,
     upem: f32,
-    points: *std.ArrayList(@Vector(2, f32)),
-    points_base_idx: u32,
-    curves: *std.ArrayList(u32),
+    points: *std.ArrayList(geo.Vec2),
+    curves: *std.ArrayList(u16),
     reverse_fill: bool,
 ) !void {
     const DecomposeCtx = struct {
-        points: *std.ArrayList(@Vector(2, f32)),
-        points_base_idx: u32,
-        curves: *std.ArrayList(u32),
+        points: *std.ArrayList(geo.Vec2),
+        curves: *std.ArrayList(u16),
         upem: f32,
 
         fn move_to(ctx: *@This(), to: freetype.Vector) !void {
@@ -378,7 +402,7 @@ fn readGlyphOutline(
             try ctx.points.append(midpoint);
             try ctx.points.append(p2);
             try ctx.curves.append(
-                @intCast(ctx.points_base_idx + ctx.points.items.len - 3),
+                @intCast(ctx.points.items.len - 3),
             );
         }
         fn conic_to(
@@ -395,7 +419,7 @@ fn readGlyphOutline(
                 @as(f32, @floatFromInt(to.y)) / ctx.upem,
             });
             try ctx.curves.append(
-                @intCast(ctx.points_base_idx + ctx.points.items.len - 3),
+                @intCast(ctx.points.items.len - 3),
             );
         }
         fn cubic_to(
@@ -424,7 +448,7 @@ fn readGlyphOutline(
                 try ctx.points.append(new_points[2 * i]);
                 try ctx.points.append(new_points[2 * i + 1]);
                 try ctx.curves.append(
-                    @intCast(ctx.points_base_idx + ctx.points.items.len - 3),
+                    @intCast(ctx.points.items.len - 3),
                 );
             }
         }
@@ -432,7 +456,6 @@ fn readGlyphOutline(
     var decompose_ctx = DecomposeCtx{
         .points = points,
         .curves = curves,
-        .points_base_idx = points_base_idx,
         .upem = upem,
     };
     try outline.decompose(&decompose_ctx, .{
@@ -449,71 +472,45 @@ fn readGlyphOutline(
         // This is to support PostScript/OTF fonts which use
         // counter-clockwise winding for the glyph outlines.
         std.mem.reverse(geo.Vec2, points.items);
-        const points_len = @as(u32, @intCast(points.items.len));
+        const points_len = @as(u16, @intCast(points.items.len));
         for (curves.items) |*curve| {
-            // idx relative to only the points in the glyph.
-            const old_curve_idx = curve.* - points_base_idx;
-
             // -2 to point to the last point in the curve that is now the new
             // first point.
-            const new_curve_idx = points_len - old_curve_idx - 1 - 2;
-
-            curve.* = points_base_idx + new_curve_idx;
+            curve.* = points_len - curve.* - 1 - 2;
         }
     }
 }
 
 fn loadGlyphBandSegments(
-    self: *Self,
     comptime axis: geo.Axis,
-    curves: []u32,
+    curves: []u16,
     points: []geo.Vec2,
-    points_base_idx: u32,
-    band_segment_store: []BandSegment,
-) ![]BandSegment {
+    staged_band_curves: *std.ArrayListAligned(u16, @alignOf(u32)),
+    staged_band_ends: *std.ArrayListAligned(u16, @alignOf(u32)),
+) !struct {
+    min_axis: f32,
+    max_axis: f32,
+} {
     if (curves.len == 0)
-        return band_segment_store[0..0];
-
-    const coaxis = switch (axis) {
-        .x => .y,
-        .y => .x,
-    };
-
-    var band_segments = struct {
-        items: []BandSegment,
-        capacity: u32,
-
-        fn append(s: *@This(), item: BandSegment) !void {
-            if (s.items.len >= s.capacity)
-                return error.OutOfMemory;
-            s.items.len += 1;
-            s.items[s.items.len - 1] = item;
-        }
-    }{
-        .items = band_segment_store[0..0],
-        .capacity = @intCast(band_segment_store.len),
-    };
-
-    // Greedy algorithm to partition into band segments:
-    // Sort curves by their rough min x/y bounding box value.
-    // Take every `curves_per_segment` curves and put them in a segment.
+        return .{
+            .min_axis = 0,
+            .max_axis = 0,
+        };
 
     const SortCtx = struct {
-        points: []@Vector(2, f32),
-        points_base_idx: u32,
+        points: []const @Vector(2, f32),
 
         fn getTightBounds(
             ctx: *@This(),
             comptime axis_: geo.Axis,
-            idx: u32,
+            idx: u16,
         ) [5]f32 {
             const axis__ = @intFromEnum(axis_);
             const p = ctx.points;
-            const b = ctx.points_base_idx;
 
-            const p0 = p[idx - b][axis__];
-            const p1 = p[idx - b + 1][axis__];
-            const p2 = p[idx - b + 2][axis__];
+            const p0 = p[idx][axis__];
+            const p1 = p[idx + 1][axis__];
+            const p2 = p[idx + 2][axis__];
 
             // midpoints
             const e1 = (p1 + p0) / 2;
@@ -529,7 +526,7 @@ fn loadGlyphBandSegments(
 
         fn curveBound(
             comptime minmax: enum { min, max },
-        ) fn (comptime geo.Axis) fn (*@This(), u32) f32 {
+        ) fn (comptime geo.Axis) fn (*@This(), u16) f32 {
             const Ctx = @This();
             const minmax_ = switch (minmax) {
                 .min => std.sort.min,
@@ -537,9 +534,9 @@ fn loadGlyphBandSegments(
             };
 
             return struct {
-                fn ff(comptime axis_: geo.Axis) fn (*Ctx, u32) f32 {
+                fn ff(comptime axis_: geo.Axis) fn (*Ctx, u16) f32 {
                     return struct {
-                        fn f(ctx: *Ctx, idx: u32) f32 {
+                        fn f(ctx: *Ctx, idx: u16) f32 {
                             return minmax_(
                                 f32,
                                 &ctx.getTightBounds(axis_, idx),
@@ -557,10 +554,10 @@ fn loadGlyphBandSegments(
 
         fn ascMin(
             comptime axis_: geo.Axis,
-        ) fn (ctx: *@This(), lhs: u32, rhs: u32) bool {
+        ) fn (ctx: *@This(), lhs: u16, rhs: u16) bool {
             const Ctx = @This();
             return struct {
-                fn f(ctx: *Ctx, lhs: u32, rhs: u32) bool {
+                fn f(ctx: *Ctx, lhs: u16, rhs: u16) bool {
                     const bound = curveBound(.min)(axis_);
                     return bound(ctx, lhs) < bound(ctx, rhs);
                 }
@@ -569,127 +566,106 @@ fn loadGlyphBandSegments(
 
         fn ascMax(
             comptime axis_: geo.Axis,
-        ) fn (ctx: *@This(), lhs: u32, rhs: u32) bool {
+        ) fn (ctx: *@This(), lhs: u16, rhs: u16) bool {
             const Ctx = @This();
             return struct {
-                fn f(ctx: *Ctx, lhs: u32, rhs: u32) bool {
+                fn f(ctx: *Ctx, lhs: u16, rhs: u16) bool {
                     const bound = curveBound(.max)(axis_);
                     return bound(ctx, lhs) < bound(ctx, rhs);
                 }
             }.f;
         }
     };
-    var sort_ctx = SortCtx{
-        .points = points,
-        .points_base_idx = points_base_idx,
+    var sort_ctx = SortCtx{ .points = points };
+
+    // we add an extra EM amount of margin to let antialiasing take place
+    // slightly outside the bounds.
+    const aa_margin = 0.01;
+
+    std.mem.sortUnstable(u16, curves, &sort_ctx, SortCtx.ascMin(axis));
+    const min_axis = SortCtx.min(axis)(&sort_ctx, curves[0]) - aa_margin;
+    const max_axis = SortCtx.max(axis)(&sort_ctx, std.sort.max(
+        u16,
+        curves,
+        &sort_ctx,
+        SortCtx.ascMax(axis),
+    ) orelse unreachable) + aa_margin;
+
+    const band_axis_size = x: {
+        // we need our floats to behave the same as on the gpu
+        @setFloatMode(.Strict);
+        break :x (max_axis - min_axis) / MAX_GLYPH_AXIS_BANDS;
     };
 
-    std.mem.sortUnstable(u32, curves, &sort_ctx, SortCtx.ascMin(axis));
+    // Extra EM space on either axis-extremity from which the band should still
+    // include curves.
+    const band_overshoot = 0.01;
 
-    var band_curves: []u32 = curves[0..0];
-    var band_axis_begin: f32 = SortCtx.min(axis)(&sort_ctx, curves[0]);
-    var band_axis_end: f32 = 0;
-    var i: u16 = 0;
-    while (i < curves.len) {
-        band_curves.len += 1;
+    var curve_cursor: u16 = 0;
+    for (0..MAX_GLYPH_AXIS_BANDS) |i| {
+        const is_last_band = i == MAX_GLYPH_AXIS_BANDS - 1;
 
-        const have_next_curve = i + 1 < curves.len;
-
-        band_axis_end = if (have_next_curve)
-            SortCtx.min(axis)(&sort_ctx, curves[i + 1])
-        else
-            SortCtx.max(axis)(&sort_ctx, std.sort.max(
-                u32,
-                band_curves,
-                &sort_ctx,
-                SortCtx.ascMax(axis),
-            ) orelse unreachable);
-
-        // Sample disk per pixel is slightly larger than 1 pixel for antialiasing.
-        // To compensate for this, we add an inset to each band to make sure we
-        // have enough information in each.
-        //
-        // This avoids inaccuracy for pixels on the edge of a band not being
-        // aware of their sample disk's coverage of a curve technically outside
-        // the bounds of the band.
-        const band_inset = 0.01;
-
-        i += 1;
-
-        if ((!have_next_curve) or
-            ((band_curves.len >= CURVES_PER_SEGMENT) and
-            (band_axis_end - band_axis_begin >= MAX_GLYPH_BAND_HEIGHT)))
-        {
-            // inset to the bottom of this band.
-            if (have_next_curve) band_axis_end -= band_inset;
-
-            // commit our band.
-
-            const band_coaxis_begin = SortCtx.min(coaxis)(&sort_ctx, std.sort.min(
-                u32,
-                band_curves,
-                &sort_ctx,
-                SortCtx.ascMin(coaxis),
-            ) orelse unreachable);
-            const band_coaxis_end = SortCtx.max(coaxis)(&sort_ctx, std.sort.max(
-                u32,
-                band_curves,
-                &sort_ctx,
-                SortCtx.ascMax(coaxis),
-            ) orelse unreachable);
-
-            const first_curve_idx = self.g_band_segment_curves.getLen();
-            try self.g_band_segment_curves.write(band_curves);
-
-            band_segments.append(.{
-                .top_left = switch (axis) {
-                    .x => geo.Vec2{ band_axis_begin, band_coaxis_end },
-                    .y => geo.Vec2{ band_coaxis_begin, band_axis_end },
-                },
-                .size = switch (axis) {
-                    .x => geo.Vec2{
-                        band_axis_end - band_axis_begin,
-                        band_coaxis_end - band_coaxis_begin,
-                    },
-                    .y => geo.Vec2{
-                        band_coaxis_end - band_coaxis_begin,
-                        band_axis_end - band_axis_begin,
-                    },
-                },
-                .curves_begin = @intCast(first_curve_idx),
-                .curves_length = @intCast(band_curves.len),
-                .band_axis = axis,
-            }) catch unreachable;
-
-            if (have_next_curve) {
-                // take back the curves that intersect the next band.
-
-                std.mem.sortUnstable( //
-                    u32, band_curves, &sort_ctx, SortCtx.ascMax(axis));
-
-                i -= for (band_curves, 0..) |bc, k| {
-                    // inset to the top of the next band
-                    if (SortCtx.max(axis)(&sort_ctx, bc) >
-                        band_axis_end - band_inset)
-                        break @as(u16, @intCast(band_curves.len - k));
-                } else 0;
+        const band_axis_end = x: {
+            @setFloatMode(.Strict);
+            if (!is_last_band) {
+                break :x min_axis + band_axis_size *
+                    @as(f32, @floatFromInt(i + 1));
+            } else {
+                break :x max_axis;
             }
+        };
 
-            band_curves = curves[i..][0..0];
-            band_axis_begin = band_axis_end;
+        const band_curves_begin = curve_cursor;
+
+        // find end
+        if (is_last_band) {
+            curve_cursor = @as(u16, @intCast(curves.len));
+        } else {
+            while (curve_cursor < curves.len) {
+                const curve_axis_begin = SortCtx.min(axis)(
+                    &sort_ctx,
+                    curves[curve_cursor],
+                );
+                if (curve_axis_begin > band_axis_end + band_overshoot) {
+                    break;
+                }
+
+                curve_cursor += 1;
+            }
+        }
+        const band_curves_end = curve_cursor;
+        const band_curves = curves[band_curves_begin..band_curves_end];
+
+        try staged_band_curves.appendSlice(band_curves);
+        try staged_band_ends.append(
+            @intCast(staged_band_curves.items.len - 1),
+        );
+
+        // take back the curves that intersect the next band.
+        if (!is_last_band) {
+            std.mem.sortUnstable( //
+                u16, band_curves, &sort_ctx, SortCtx.ascMax(axis));
+
+            curve_cursor -= for (band_curves, 0..) |bc, k| {
+                // overshoot the top of the next band
+                if (SortCtx.max(axis)(&sort_ctx, bc) >
+                    band_axis_end - band_overshoot)
+                    break @as(u16, @intCast(band_curves.len - k));
+            } else 0;
         }
     }
 
-    return band_segments.items;
+    return .{
+        .min_axis = min_axis,
+        .max_axis = max_axis,
+    };
 }
 
-// TODO: make the function instead:
-//       - compute and store the glyph's fixed sized segments
-// Returns the number of written band segments.
+/// Returns the index of the first encoded u32 of the glyph data.
 fn loadGlyph(
     self: *Self,
     key: LoadedGlyphKey,
-) !GlyphWindowSlice {
+) !u32 {
     const font = &self.loaded_fonts.values()[key.font_idx];
     try font.ft_face.loadGlyph(key.glyph_index, .{
         .no_bitmap = true,
@@ -718,77 +694,46 @@ fn loadGlyph(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var points = std.ArrayList(@Vector(2, f32)).init(arena_alloc);
-    var curves = std.ArrayList(u32).init(arena_alloc);
-    const points_base_idx: u32 = @intCast(self.g_glyph_points.getLen());
+    var builder = GGlyphDataBuilder.init(arena_alloc);
+    // Array of all the curves in the glyph.
+    // Only used to compute the band segments, not written to the glyphdata
+    // directly.
+    var curves = std.ArrayList(u16).init(arena_alloc);
 
     const upem: f32 = @floatFromInt(font.ft_face.unitsPerEM());
 
     try readGlyphOutline(
         outline,
         upem,
-        &points,
-        points_base_idx,
+        &builder.points,
         &curves,
         flags.reverse_fill,
     );
-    try self.g_glyph_points.write(points.items);
-
-    // NOTE: starting here we can mutate `points` as it's
-    //       already been written to the GPU.
-
-    // Vertical Partition:
-
-    var band_segment_store: [MAX_GLYPH_AXIS_BANDS * 2]BandSegment = undefined;
-    const vert_band_segs = try self.loadGlyphBandSegments(
+    const x_bounds = try loadGlyphBandSegments(
         .x,
         curves.items,
-        points.items,
-        points_base_idx,
-        band_segment_store[0..],
+        builder.points.items,
+        &builder.vert_band_curves,
+        &builder.vert_band_ends,
     );
-    const hori_band_segs = try self.loadGlyphBandSegments(
+    const y_bounds = try loadGlyphBandSegments(
         .y,
         curves.items,
-        points.items,
-        points_base_idx,
-        band_segment_store[vert_band_segs.len..],
+        builder.points.items,
+        &builder.hori_band_curves,
+        &builder.hori_band_ends,
     );
-
-    const first_window_idx: u16 =
-        @intCast(self.loaded_glyph_windows.items.len);
-
-    // windows are intersections between horizontal and vertical bands.
-    try self.loaded_glyph_windows.ensureUnusedCapacity(
-        hori_band_segs.len * vert_band_segs.len,
-    );
-    for (hori_band_segs) |hori_band_seg| {
-        for (vert_band_segs) |vert_band_seg| {
-            try self.loaded_glyph_windows.append(.{
-                .em_window_top_left = .{
-                    @max(hori_band_seg.top_left[0], vert_band_seg.top_left[0]),
-                    @min(hori_band_seg.top_left[1], vert_band_seg.top_left[1]),
-                },
-                .em_window_size = @min(hori_band_seg.size, vert_band_seg.size),
-                .vert_curves_begin = vert_band_seg.curves_begin,
-                .hori_curves_begin = hori_band_seg.curves_begin,
-                .vh_curves_lengths = .{
-                    .hori = hori_band_seg.curves_length,
-                    .vert = vert_band_seg.curves_length,
-                },
-            });
-        }
-    }
-
-    const last_window_idx: u16 =
-        @intCast(self.loaded_glyph_windows.items.len);
-    return .{
-        .begin = first_window_idx,
-        .len = last_window_idx - first_window_idx,
+    builder.info = .{
+        .em_window_bottom_left = .{ x_bounds.min_axis, y_bounds.min_axis },
+        .em_window_top_right = .{ x_bounds.max_axis, y_bounds.max_axis },
     };
+
+    const data_begin: u32 = @intCast(self.g_glyph_data.getLen());
+    try builder.write(&self.g_glyph_data);
+    return data_begin;
 }
 
-fn getOrLoadGlyph(self: *Self, key: LoadedGlyphKey) !GlyphWindowSlice {
+fn getOrLoadGlyph(self: *Self, key: LoadedGlyphKey) !u32 {
     const gop = try self.loaded_glyphs.getOrPut(key);
     if (gop.found_existing) {
         return gop.value_ptr.*;
@@ -830,7 +775,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
     const pass = encoder.beginRenderPass(&render_pass_info);
     pass.setPipeline(self.pipeline);
 
-    self.g_glyph_windows.clear();
+    self.g_glyph_instances.clear();
 
     const hb_buffer = harfbuzz.Buffer.init() orelse return error.OutOfMemory;
 
@@ -872,62 +817,34 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
             const glyph_index = glyph_info.codepoint;
 
             // Get or load the glyph outline.
-            const glyph_windows = try self.getOrLoadGlyph(.{
+            const glyph_data_begin = try self.getOrLoadGlyph(.{
                 .font_idx = text.font_idx,
                 .glyph_index = glyph_index,
             });
 
-            const windows = glyph_windows.slice(
-                self.loaded_glyph_windows.items,
-            );
+            // convert em-space coords to screen-space:
+            const ss_top_left = @floor((cursor + offset) * ppem);
+            const ss_scale = ppem;
 
-            for (windows) |window| {
-                // TODO: add this back in but during loadGlyph
-                // // extend the segment by a bit on each side to avoid
-                // // clipping the glyph's antialiased curves.
-                // const segment_px_padding = switch (segment.band_axis) {
-                //     .x => geo.Vec2{ 0, 1.0 },
-                //     .y => geo.Vec2{ 1.0, 0 },
-                // };
-                // const segment_em_padding = segment_px_padding / ppem;
-
-                // convert em-space coords to screen-space:
-                const ss_top_left = @floor((cursor + offset) * ppem) + (geo.Vec2{
-                    window.em_window_top_left[0],
-                    1 - window.em_window_top_left[1],
-                } * ppem);
-                const ss_size = window.em_window_size * ppem;
-
-                const em_window_top_left = window.em_window_top_left;
-                const em_window_size = window.em_window_size;
-
-                try self.g_glyph_windows.writeOne(.{
-                    .top_left = out_dims.normalize(ss_top_left),
-                    .size = out_dims.normalize_delta(ss_size),
-                    .em_window_top_left = em_window_top_left,
-                    .em_window_size = em_window_size,
-                    .vert_curves_begin = window.vert_curves_begin,
-                    .hori_curves_begin = window.hori_curves_begin,
-                    .vh_curves_lengths = .{
-                        .vert = window.vh_curves_lengths.vert,
-                        .hori = window.vh_curves_lengths.hori,
-                    },
-                });
-            }
+            try self.g_glyph_instances.writeOne(.{
+                .top_left = out_dims.normalize(ss_top_left),
+                .scale = out_dims.normalize_delta(ss_scale),
+                .glyph_data_begin = glyph_data_begin,
+            });
 
             cursor += advance;
         }
     }
 
-    const seg_insts = self.g_glyph_windows.getLen();
+    const glyph_insts = self.g_glyph_instances.getLen();
     pass.setVertexBuffer(
         0,
-        self.g_glyph_windows.getRawBuffer(),
+        self.g_glyph_instances.getRawBuffer(),
         0,
-        seg_insts * @sizeOf(GGlyphWindow),
+        glyph_insts * @sizeOf(GGlyphInstance),
     );
     pass.setBindGroup(0, self.glyph_data_bgroup, null);
-    pass.draw(6, @intCast(seg_insts), 0, 0);
+    pass.draw(6, @intCast(glyph_insts), 0, 0);
 
     pass.end();
     pass.release();
