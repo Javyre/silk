@@ -2,6 +2,7 @@
 
 override show_control_points: bool = false;
 override show_segments: bool = false;
+override show_segment_splits: bool = false;
 override show_em_uv: bool = false;
 
 @group(0) @binding(0)
@@ -18,13 +19,19 @@ struct VertexOut {
     @location(0) em_uv: vec2<f32>,
     @location(1) @interpolate(flat) em_window_bottom_left: vec2<f32>,
     @location(2) @interpolate(flat) em_window_size: vec2<f32>,
-    @location(3) @interpolate(flat) vert_bands_length: u32,
-    @location(4) @interpolate(flat) hori_bands_length: u32,
-    @location(5) @interpolate(flat) vert_band_ends_ofs: u32,
-    @location(6) @interpolate(flat) hori_band_ends_ofs: u32,
-    @location(7) @interpolate(flat) vert_band_curves_ofs: u32,
-    @location(8) @interpolate(flat) hori_band_curves_ofs: u32,
-    @location(9) @interpolate(flat) glyph_points_ofs: u32,
+    @location(3) @interpolate(flat) vert_band_count: u32,
+    @location(4) @interpolate(flat) hori_band_count: u32,
+    @location(5) @interpolate(flat) vert_band_splits_ofs: u32,
+    @location(6) @interpolate(flat) hori_band_splits_ofs: u32,
+    @location(7) @interpolate(flat) vert_band_ends_ofs: u32,
+    @location(8) @interpolate(flat) hori_band_ends_ofs: u32,
+    @location(9) @interpolate(flat) vert_band_curves_ofs: u32,
+    @location(10) @interpolate(flat) hori_band_curves_ofs: u32,
+    @location(11) @interpolate(flat) glyph_points_ofs: u32,
+}
+
+fn glyph_get_f32(ofs: u32, f32_idx: u32) -> f32 {
+    return bitcast<f32>(glyph_data[ofs + f32_idx]);
 }
 
 fn glyph_get_u16(ofs: u32, u16_idx: u32) -> u32 {
@@ -64,32 +71,30 @@ fn u32_padded_u16_size(u16_size: u32) -> u32 {
     out.em_window_size = em_window_size;
 
     let glyph_lengths_ofs = glyph_data_ofs + 4u;
-    let vert_bands_length = glyph_get_u16(glyph_lengths_ofs, 0u);
-    let hori_bands_length = glyph_get_u16(glyph_lengths_ofs, 1u);
+    let vert_band_count = glyph_get_u16(glyph_lengths_ofs, 0u);
+    let hori_band_count = glyph_get_u16(glyph_lengths_ofs, 1u);
 
-    let vert_band_ends_ofs = glyph_data_ofs + 5u;
-    let vert_band_curves_ofs = vert_band_ends_ofs +
-        u32_padded_u16_size(vert_bands_length);
-    let vert_band_curves_length = 
-        glyph_get_u16(vert_band_ends_ofs, vert_bands_length - 1u) + 1u;
+    let vert_band_splits_ofs    = glyph_data_ofs + 5u;
+    let vert_band_ends_ofs      = vert_band_splits_ofs + vert_band_count;
+    let vert_band_curves_ofs    = vert_band_ends_ofs   + u32_padded_u16_size(vert_band_count * 2u);
+    let vert_band_curves_length = glyph_get_u16(vert_band_ends_ofs, vert_band_count * 2u - 1u) + 1u;
 
-    let hori_band_ends_ofs = vert_band_curves_ofs +
-        u32_padded_u16_size(vert_band_curves_length);
-    let hori_band_curves_ofs = hori_band_ends_ofs +
-        u32_padded_u16_size(hori_bands_length);
-    let hori_band_curves_length = 
-        glyph_get_u16(hori_band_ends_ofs, hori_bands_length - 1u) + 1u;
+    let hori_band_splits_ofs    = vert_band_curves_ofs + u32_padded_u16_size(vert_band_curves_length);
+    let hori_band_ends_ofs      = hori_band_splits_ofs + hori_band_count;
+    let hori_band_curves_ofs    = hori_band_ends_ofs   + u32_padded_u16_size(hori_band_count * 2u);
+    let hori_band_curves_length = glyph_get_u16(hori_band_ends_ofs, hori_band_count * 2u - 1u) + 1u;
 
-    let glyph_points_ofs = hori_band_curves_ofs +
-        u32_padded_u16_size(hori_band_curves_length);
+    let glyph_points_ofs = hori_band_curves_ofs + u32_padded_u16_size(hori_band_curves_length);
 
-    out.vert_bands_length = vert_bands_length;
-    out.hori_bands_length = hori_bands_length;
+    out.vert_band_count      = vert_band_count;
+    out.hori_band_count      = hori_band_count;
+    out.vert_band_splits_ofs = vert_band_splits_ofs;
     out.vert_band_curves_ofs = vert_band_curves_ofs;
-    out.vert_band_ends_ofs = vert_band_ends_ofs;
+    out.vert_band_ends_ofs   = vert_band_ends_ofs;
+    out.hori_band_splits_ofs = hori_band_splits_ofs;
     out.hori_band_curves_ofs = hori_band_curves_ofs;
-    out.hori_band_ends_ofs = hori_band_ends_ofs;
-    out.glyph_points_ofs = glyph_points_ofs;
+    out.hori_band_ends_ofs   = hori_band_ends_ofs;
+    out.glyph_points_ofs     = glyph_points_ofs;
 
     let indicator = array(
         vec2<u32>(0, 0),
@@ -193,6 +198,7 @@ fn compute_coverage_for_curve(
 
 fn compute_coverage(
     is_vertical_curve_band: bool,
+    is_reverse_ray: bool,
     glyph_points_ofs: u32,
     band_curves_ofs: u32,
     curves_begin: u32,
@@ -207,18 +213,22 @@ fn compute_coverage(
 
         // == Compute sample coverage by the curve == //
 
-        var p0 = glyph_get_vec2f(glyph_points_ofs, first_point_idx)
-            - em_uv;
-        var p1 = glyph_get_vec2f(glyph_points_ofs, first_point_idx + 1u)
-            - em_uv;
-        var p2 = glyph_get_vec2f(glyph_points_ofs, first_point_idx + 2u) 
-            - em_uv;
+        var p0 = glyph_get_vec2f(glyph_points_ofs, first_point_idx) - em_uv;
+        var p1 = glyph_get_vec2f(glyph_points_ofs, first_point_idx + 1u) - em_uv;
+        var p2 = glyph_get_vec2f(glyph_points_ofs, first_point_idx + 2u) - em_uv;
 
         if (is_vertical_curve_band) {
-            // rotate
+            // rotate 90 degrees
             p0 = vec2f(p0.y, -p0.x);
             p1 = vec2f(p1.y, -p1.x);
             p2 = vec2f(p2.y, -p2.x);
+        }
+
+        if (is_reverse_ray) {
+            // rotate 180 degrees
+            p0 = vec2f(-p0.x, -p0.y);
+            p1 = vec2f(-p1.x, -p1.y);
+            p2 = vec2f(-p2.x, -p2.y);
         }
 
         alpha += compute_coverage_for_curve(inv_sample_diam, p0, p1, p2);
@@ -352,45 +362,54 @@ fn blend(bg: vec4<f32>, fg: vec4<f32>) -> vec4<f32> {
     let em_window_size = vert.em_window_size;
 
     let band_count = vec2<u32>(
-        vert.vert_bands_length, 
-        vert.hori_bands_length, 
+        vert.vert_band_count, 
+        vert.hori_band_count, 
     );
     let band_size = em_window_size / vec2<f32>(band_count);
     let band_idx = vec2<u32>(trunc(
         (em_uv - em_window_bottom_left) / band_size)
     );
 
+    let vert_band_split: f32 = glyph_get_f32(vert.vert_band_splits_ofs, band_idx.x);
+    let hori_band_split: f32 = glyph_get_f32(vert.hori_band_splits_ofs, band_idx.y);
+    let band_split = vec2<f32>(hori_band_split, vert_band_split);
+
+    let band_seg_reverse = (em_uv < band_split).yx;
+    let band_seg_idx = vec2<u32>(!band_seg_reverse);
+    let curves_idx = band_seg_idx + (band_idx * 2u);
+
     var vert_curves_begin: u32 = 0u;
     var hori_curves_begin: u32 = 0u;
-    if (band_idx.x > 0u) {
-        vert_curves_begin =
-            glyph_get_u16(vert.vert_band_ends_ofs, band_idx.x - 1u) + 1u;
+    if (curves_idx.x > 0u) {
+        vert_curves_begin = glyph_get_u16(vert.vert_band_ends_ofs, curves_idx.x - 1u) + 1u;
     }
-    if (band_idx.y > 0u) {
-        hori_curves_begin =
-            glyph_get_u16(vert.hori_band_ends_ofs, band_idx.y - 1u) + 1u;
+    if (curves_idx.y > 0u) {
+        hori_curves_begin = glyph_get_u16(vert.hori_band_ends_ofs, curves_idx.y - 1u) + 1u;
     }
-    let vert_curves_end = glyph_get_u16(vert.vert_band_ends_ofs, band_idx.x);
-    let hori_curves_end = glyph_get_u16(vert.hori_band_ends_ofs, band_idx.y);
+
+    let vert_curves_end = glyph_get_u16(vert.vert_band_ends_ofs, curves_idx.x);
+    let hori_curves_end = glyph_get_u16(vert.hori_band_ends_ofs, curves_idx.y);
 
     var alpha: f32 = 0.0;
 
     alpha += compute_coverage( 
-        false,
-        vert.glyph_points_ofs,
-        vert.hori_band_curves_ofs,
-        hori_curves_begin,
-        hori_curves_end,
-        inverse_sample_diameter.x,
-        em_uv,
-    );
-    alpha += compute_coverage( 
         true,
+        band_seg_reverse.x,
         vert.glyph_points_ofs,
         vert.vert_band_curves_ofs,
         vert_curves_begin,
         vert_curves_end,
         inverse_sample_diameter.y,
+        em_uv,
+    );
+    alpha += compute_coverage( 
+        false,
+        band_seg_reverse.y,
+        vert.glyph_points_ofs,
+        vert.hori_band_curves_ofs,
+        hori_curves_begin,
+        hori_curves_end,
+        inverse_sample_diameter.x,
         em_uv,
     );
 
@@ -429,6 +448,15 @@ fn blend(bg: vec4<f32>, fg: vec4<f32>) -> vec4<f32> {
         //     0.5,
         // );
         out = blend(seg, out);
+    }
+
+    if (show_segment_splits) {
+        let seg_split = vec4<f32>(
+            vec2<f32>(band_seg_idx),
+            0.0,
+            0.5,
+        );
+        out = blend(out, seg_split);
     }
 
     return out;

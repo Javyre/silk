@@ -76,8 +76,10 @@ const GlyphWindow = struct {
 /// GlyphData: { // fields aligned to 4 bytes
 ///     info: GlyphInfo,
 ///     lengths: GlyphLengths,
+///     vart_band_splits: []f32,
 ///     vert_band_ends: []u16,
 ///     vert_band_curves: []u16,
+///     hori_band_splits: []f32,
 ///     hori_band_ends: []u16,
 ///     hori_band_curves: []u16,
 ///     points: []geo.Vec2,
@@ -86,9 +88,11 @@ const GGlyphDataBuilder = struct {
     const ArrayListU16 = std.ArrayListAligned(u16, @alignOf(u32));
 
     info: ?GlyphInfo = null,
+    vert_band_splits: std.ArrayList(f32),
     /// Amount of curves in each vert band.
     vert_band_ends: ArrayListU16,
     vert_band_curves: ArrayListU16,
+    hori_band_splits: std.ArrayList(f32),
     /// Amount of curves in each hori band.
     hori_band_ends: ArrayListU16,
     hori_band_curves: ArrayListU16,
@@ -100,9 +104,9 @@ const GGlyphDataBuilder = struct {
     };
     const GlyphLengths = packed struct(u32) {
         /// Amount of vert bands
-        vert_bands_length: u16 = 0,
+        vert_band_count: u16 = 0,
         /// Amount of hori bands
-        hori_bands_length: u16 = 0,
+        hori_band_count: u16 = 0,
     };
     comptime {
         std.debug.assert(@sizeOf(GlyphInfo) == 4 * @sizeOf(u32));
@@ -112,8 +116,10 @@ const GGlyphDataBuilder = struct {
     fn init(alloc: std.mem.Allocator) GGlyphDataBuilder {
         return .{
             .info = null,
+            .vert_band_splits = std.ArrayList(f32).init(alloc),
             .vert_band_ends = ArrayListU16.init(alloc),
             .vert_band_curves = ArrayListU16.init(alloc),
+            .hori_band_splits = std.ArrayList(f32).init(alloc),
             .hori_band_ends = ArrayListU16.init(alloc),
             .hori_band_curves = ArrayListU16.init(alloc),
             .points = std.ArrayList(geo.Vec2).init(alloc),
@@ -145,11 +151,13 @@ const GGlyphDataBuilder = struct {
             &(self.info orelse return error.InvalidState);
         try writePadded(asBytes(info), dest);
         try writePadded(asBytes(&GlyphLengths{
-            .vert_bands_length = @intCast(self.vert_band_ends.items.len),
-            .hori_bands_length = @intCast(self.hori_band_ends.items.len),
+            .vert_band_count = @intCast(self.vert_band_ends.items.len / 2),
+            .hori_band_count = @intCast(self.hori_band_ends.items.len / 2),
         }), dest);
+        try writePadded(sliceAsBytes(self.vert_band_splits.items), dest);
         try writePadded(sliceAsBytes(self.vert_band_ends.items), dest);
         try writePadded(sliceAsBytes(self.vert_band_curves.items), dest);
+        try writePadded(sliceAsBytes(self.hori_band_splits.items), dest);
         try writePadded(sliceAsBytes(self.hori_band_ends.items), dest);
         try writePadded(sliceAsBytes(self.hori_band_curves.items), dest);
         try writePadded(sliceAsBytes(self.points.items), dest);
@@ -485,6 +493,7 @@ fn loadGlyphBandSegments(
     comptime axis: geo.Axis,
     curves: []u16,
     points: []geo.Vec2,
+    staged_band_splits: *std.ArrayList(f32),
     staged_band_curves: *std.ArrayListAligned(u16, @alignOf(u32)),
     staged_band_ends: *std.ArrayListAligned(u16, @alignOf(u32)),
 ) !struct {
@@ -496,6 +505,11 @@ fn loadGlyphBandSegments(
             .min_axis = 0,
             .max_axis = 0,
         };
+
+    const coaxis = switch (axis) {
+        .x => .y,
+        .y => .x,
+    };
 
     const SortCtx = struct {
         points: []const @Vector(2, f32),
@@ -636,7 +650,41 @@ fn loadGlyphBandSegments(
         const band_curves_end = curve_cursor;
         const band_curves = curves[band_curves_begin..band_curves_end];
 
-        try staged_band_curves.appendSlice(band_curves);
+        // Split into two segments
+        std.mem.sortUnstable( //
+            u16, band_curves, &sort_ctx, SortCtx.ascMin(coaxis));
+
+        const median_idx = band_curves.len / 2;
+        const split_point = SortCtx.min(coaxis)(
+            &sort_ctx,
+            band_curves[median_idx],
+        );
+        try staged_band_splits.append(split_point);
+
+        const split_curve_idx_1 = for (
+            band_curves[median_idx..],
+            median_idx..,
+        ) |bc, k| {
+            if (SortCtx.min(coaxis)(&sort_ctx, bc) > split_point)
+                break @as(u16, @intCast(k - 1));
+        } else median_idx;
+
+        const band_curves_1 = band_curves[0 .. split_curve_idx_1 + 1];
+        try staged_band_curves.appendSlice(band_curves_1);
+        try staged_band_ends.append(
+            @intCast(staged_band_curves.items.len - 1),
+        );
+
+        std.mem.sortUnstable( //
+            u16, band_curves, &sort_ctx, SortCtx.ascMax(coaxis));
+
+        const split_curve_idx_2 = for (band_curves, 0..) |bc, k| {
+            if (SortCtx.max(coaxis)(&sort_ctx, bc) >= split_point)
+                break @as(u16, @intCast(k));
+        } else unreachable;
+
+        const band_curves_2 = band_curves[split_curve_idx_2..];
+        try staged_band_curves.appendSlice(band_curves_2);
         try staged_band_ends.append(
             @intCast(staged_band_curves.items.len - 1),
         );
@@ -713,6 +761,7 @@ fn loadGlyph(
         .x,
         curves.items,
         builder.points.items,
+        &builder.vert_band_splits,
         &builder.vert_band_curves,
         &builder.vert_band_ends,
     );
@@ -720,6 +769,7 @@ fn loadGlyph(
         .y,
         curves.items,
         builder.points.items,
+        &builder.hori_band_splits,
         &builder.hori_band_curves,
         &builder.hori_band_ends,
     );
