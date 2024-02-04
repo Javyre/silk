@@ -828,6 +828,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
     self.g_glyph_instances.clear();
 
     const hb_buffer = harfbuzz.Buffer.init() orelse return error.OutOfMemory;
+    defer hb_buffer.deinit();
 
     for (texts) |text| {
         // TODO: font size should be in pt per EM.
@@ -841,7 +842,9 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
         hb_buffer.guessSegmentProps();
 
         const hb_face = harfbuzz.Face.fromFreetypeFace(font.ft_face);
+        defer hb_face.deinit();
         const hb_font = harfbuzz.Font.init(hb_face);
+        defer hb_font.deinit();
         // 64ths of an em.
         hb_font.setScale(64, 64);
 
