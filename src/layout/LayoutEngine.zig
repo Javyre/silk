@@ -993,10 +993,10 @@ pub fn expectElementIndices(
     expected: []const u32,
     actual: []const u32,
 ) !void {
-    var pretty_expected =
+    const pretty_expected =
         try std.testing.allocator.alloc(PrettyIndex, expected.len);
     defer std.testing.allocator.free(pretty_expected);
-    var pretty_actual =
+    const pretty_actual =
         try std.testing.allocator.alloc(PrettyIndex, actual.len);
     defer std.testing.allocator.free(pretty_actual);
 

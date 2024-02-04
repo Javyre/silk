@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) !void {
         .src = "src/main.zig",
         .target = target,
         .optimize = optimize,
-        .deps = &[_]std.build.ModuleDependency{
+        .deps = &[_]std.Build.Module.Import{
             .{
                 .name = "mach-freetype",
                 .module = mach_freetype_dep.module("mach-freetype"),
@@ -30,12 +30,13 @@ pub fn build(b: *std.Build) !void {
             },
         },
     });
-    mach_freetype.linkFreetype(mach_freetype_dep.builder, app.compile);
-    mach_freetype.linkHarfbuzz(mach_freetype_dep.builder, app.compile);
     // NOTE: We use dynamically link system fontconfig because it is often
     //       built with OS/distribution-dependent search paths in case of
     //       no `FC_` env-vars set.
-    app.compile.linkSystemLibrary("fontconfig");
+    const app_mod = app.compile.root_module.import_table.get("app").?;
+    app_mod.resolved_target = target;
+    app_mod.linkSystemLibrary("fontconfig", .{});
+
     if (b.args) |args| app.run.addArgs(args);
 
     const run_step = b.step("run", "Run the app");

@@ -227,12 +227,12 @@ fn writeRectSimple(
         .color = rect.color,
     });
 
-    try ib.writeIntNative(u16, v_idx + 0);
-    try ib.writeIntNative(u16, v_idx + 1);
-    try ib.writeIntNative(u16, v_idx + 2);
-    try ib.writeIntNative(u16, v_idx + 0);
-    try ib.writeIntNative(u16, v_idx + 2);
-    try ib.writeIntNative(u16, v_idx + 3);
+    try ib.writeInt(u16, v_idx + 0, .little);
+    try ib.writeInt(u16, v_idx + 1, .little);
+    try ib.writeInt(u16, v_idx + 2, .little);
+    try ib.writeInt(u16, v_idx + 0, .little);
+    try ib.writeInt(u16, v_idx + 2, .little);
+    try ib.writeInt(u16, v_idx + 3, .little);
 
     return 4;
 }
@@ -370,19 +370,19 @@ fn writeRectRounded(
         const i = @as(u16, @intCast(_i));
 
         // inner rounded corner to center
-        try ib.writeIntNative(u16, v_idx);
-        try ib.writeIntNative(u16, v.idx(.inner, i));
-        try ib.writeIntNative(u16, v.idx(.inner, i + 1));
+        try ib.writeInt(u16, v_idx, .little);
+        try ib.writeInt(u16, v.idx(.inner, i), .little);
+        try ib.writeInt(u16, v.idx(.inner, i + 1), .little);
 
         // outer rounded corner to inner rounded corner
         //
         // quad(outer.i, outer.i + 1, inner.i + 1, inner.i)
-        try ib.writeIntNative(u16, v.idx(.outer, i));
-        try ib.writeIntNative(u16, v.idx(.outer, i + 1));
-        try ib.writeIntNative(u16, v.idx(.inner, i + 1));
-        try ib.writeIntNative(u16, v.idx(.inner, i));
-        try ib.writeIntNative(u16, v.idx(.outer, i));
-        try ib.writeIntNative(u16, v.idx(.inner, i + 1));
+        try ib.writeInt(u16, v.idx(.outer, i), .little);
+        try ib.writeInt(u16, v.idx(.outer, i + 1), .little);
+        try ib.writeInt(u16, v.idx(.inner, i + 1), .little);
+        try ib.writeInt(u16, v.idx(.inner, i), .little);
+        try ib.writeInt(u16, v.idx(.outer, i), .little);
+        try ib.writeInt(u16, v.idx(.inner, i + 1), .little);
     }
 
     return v.corner_v_count_total * 2 + 1;
