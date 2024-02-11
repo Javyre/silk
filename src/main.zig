@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("mach-core");
 const gpu = core.gpu;
 
+const FontManager = @import("FontManager.zig");
 const LayoutEngine = @import("layout/LayoutEngine.zig");
 const RenderEngine = @import("render/RenderEngine.zig");
 
@@ -16,6 +17,7 @@ pub const App = @This();
 
 gpa: std.heap.GeneralPurposeAllocator(.{}),
 
+font_manager: FontManager,
 layout_engine: LayoutEngine,
 render_engine: RenderEngine,
 view_1: u32,
@@ -29,7 +31,8 @@ pub fn init(app: *App) !void {
     app.gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
     const alloc = app.gpa.allocator();
-    const render_engine = try RenderEngine.init(alloc);
+    app.font_manager = try FontManager.init(alloc);
+    const render_engine = try RenderEngine.init(alloc, &app.font_manager);
     var layout_engine = try LayoutEngine.init(alloc);
     const le = &layout_engine;
 
@@ -157,6 +160,7 @@ pub fn init(app: *App) !void {
 
     app.* = .{
         .gpa = app.gpa,
+        .font_manager = app.font_manager,
         .layout_engine = layout_engine,
         .render_engine = render_engine,
         .view_1 = view_1,
@@ -174,6 +178,7 @@ pub fn deinit(app: *App) void {
         if (app.gpa.deinit() == .leak)
             std.log.warn("Leaked memory\n", .{});
     }
+    defer app.font_manager.deinit();
     defer app.render_engine.deinit();
     defer {
         app.layout_engine.deinit() catch unreachable;
@@ -249,7 +254,7 @@ pub fn update(app: *App) !bool {
 
     try app.layout_engine.flushLayout();
     try app.layout_engine.renderFrame(&app.render_engine);
-    const font = try app.render_engine.text_pass.getOrLoadFont("Georgia");
+    const font = try app.font_manager.getOrLoadFont("Georgia");
     try app.render_engine.writeText(
         .{ 50, 50 },
         "gHello, world!\ntesting testing blablabla...",

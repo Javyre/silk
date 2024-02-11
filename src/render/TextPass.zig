@@ -3,13 +3,11 @@ const core = @import("mach-core");
 const gpu = core.gpu;
 const freetype = @import("mach-freetype");
 const harfbuzz = @import("mach-harfbuzz");
-const c = @cImport({
-    @cInclude("fontconfig/fontconfig.h");
-});
 
 const geo = @import("../geo.zig");
 const bezier = @import("bezier.zig");
 const buffer_writer = @import("buffer_writer.zig");
+const FontManager = @import("../FontManager.zig");
 const GArrayList = buffer_writer.GArrayList;
 
 const Self = @This();
@@ -19,9 +17,7 @@ const MAX_GLYPHS_LOADED_COUNT = 2048;
 const MAX_GLYPHS_DISPLAYED_COUNT = 1024;
 const MAX_GLYPH_AXIS_BANDS = 8;
 
-ft_library: freetype.Library,
-fc_config: *c.FcConfig,
-loaded_fonts: std.StringArrayHashMap(Font),
+font_manager: *FontManager,
 loaded_glyphs: std.AutoArrayHashMap(LoadedGlyphKey, u32),
 
 pipeline: *gpu.RenderPipeline,
@@ -194,10 +190,6 @@ const GGlyphInstance = packed struct {
     }
 };
 
-const Font = struct {
-    ft_face: freetype.Face,
-};
-
 pub const Text = struct {
     pos: geo.Vec2,
     text: []const u8,
@@ -209,7 +201,10 @@ pub const Text = struct {
 /// band segment curves buffer.
 const NULL_CURVE = 0;
 
-pub fn init(alloc: std.mem.Allocator) !Self {
+pub fn init(
+    alloc: std.mem.Allocator,
+    font_manager: *FontManager,
+) !Self {
     const shader_module = core.device.createShaderModuleWGSL(
         "text_pass.wgsl",
         @embedFile("text_pass.wgsl"),
@@ -302,10 +297,7 @@ pub fn init(alloc: std.mem.Allocator) !Self {
     const pipeline = core.device.createRenderPipeline(&pipeline_descriptor);
 
     return .{
-        .ft_library = try freetype.Library.init(),
-        .fc_config = c.FcInitLoadConfigAndFonts() orelse
-            return error.FcInitFailed,
-        .loaded_fonts = std.StringArrayHashMap(Font).init(alloc),
+        .font_manager = font_manager,
         .loaded_glyphs = std.AutoArrayHashMap(LoadedGlyphKey, u32).init(alloc),
         .pipeline = pipeline,
         .g_glyph_data = g_glyph_data,
@@ -320,64 +312,9 @@ pub fn deinit(self: *Self) !void {
     self.g_glyph_data.deinit();
     self.g_glyph_instances.deinit();
 
-    c.FcConfigDestroy(self.fc_config);
-    c.FcFini();
-    self.ft_library.deinit();
-    self.loaded_fonts.deinit();
     self.loaded_glyphs.deinit();
 
     self.* = undefined;
-}
-
-pub fn getFontIndex(self: *Self, name: []const u8) ?u16 {
-    if (self.loaded_fonts.getIndex(name)) |idx|
-        return @as(u16, @intCast(idx));
-    return null;
-}
-
-pub fn loadFont(self: *Self, name: [:0]const u8) !u16 {
-    const pat = c.FcNameParse(name) orelse return error.FcNameParseFailed;
-    if (c.FcConfigSubstitute(self.fc_config, pat, c.FcMatchPattern) != c.FcTrue)
-        return error.OutOfMemory;
-    c.FcDefaultSubstitute(pat);
-
-    var result: c.FcResult = undefined;
-    const font = c.FcFontMatch(self.fc_config, pat, &result) orelse {
-        return error.FcNoFontFound;
-    };
-
-    // The filename holding the font relative to the config's sysroot
-    var path: ?[*:0]u8 = undefined;
-    if (c.FcPatternGetString(font, c.FC_FILE, 0, &path) != c.FcResultMatch) {
-        return error.FcPatternGetFailed;
-    }
-
-    // The index of the font within the file
-    var index: c_int = undefined;
-    if (c.FcPatternGetInteger(font, c.FC_INDEX, 0, &index) != c.FcResultMatch) {
-        return error.FcPatternGetFailed;
-    }
-
-    const ft_face = try self.ft_library.createFace(path orelse unreachable, index);
-
-    // TODO: find better value to use as key here. The fontconfig search pattern
-    //       string is not reliable as it implies certain default values and is
-    //       not portable across other font matching libs we'll eventually have
-    //       to option to use.
-    const gop = try self.loaded_fonts.getOrPut(name);
-    if (gop.found_existing)
-        @panic("TODO");
-    gop.value_ptr.* = .{
-        .ft_face = ft_face,
-    };
-    return @as(u16, @intCast(gop.index));
-}
-
-pub fn getOrLoadFont(self: *Self, name: [:0]const u8) !u16 {
-    if (self.getFontIndex(name)) |idx| {
-        return idx;
-    }
-    return self.loadFont(name);
 }
 
 fn readGlyphOutline(
@@ -714,7 +651,7 @@ fn loadGlyph(
     self: *Self,
     key: LoadedGlyphKey,
 ) !u32 {
-    const font = &self.loaded_fonts.values()[key.font_idx];
+    const font = self.font_manager.getFont(key.font_idx);
     try font.ft_face.loadGlyph(key.glyph_index, .{
         .no_bitmap = true,
         .no_scale = true,
@@ -835,7 +772,7 @@ pub fn draw(self: *Self, output: *gpu.Texture, texts: []const Text) !void {
         // Pixels Per EM
         const ppem: geo.Vec2 = @splat(text.font_size);
 
-        const font = &self.loaded_fonts.values()[text.font_idx];
+        const font = self.font_manager.getFont(text.font_idx);
         hb_buffer.reset();
         hb_buffer.addUTF8(text.text, 0, null);
         // TODO: allow specifying direction/script/language

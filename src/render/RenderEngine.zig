@@ -3,6 +3,7 @@ const core = @import("mach-core");
 const gpu = core.gpu;
 
 const geo = @import("../geo.zig");
+const FontManager = @import("../FontManager.zig");
 const TextPass = @import("TextPass.zig");
 const RectPass = @import("RectPass.zig");
 
@@ -13,9 +14,9 @@ text_buffer: std.ArrayList(TextPass.Text),
 rect_pass: RectPass,
 rect_buffer: std.ArrayList(geo.Rect),
 
-pub fn init(alloc: std.mem.Allocator) !Self {
+pub fn init(alloc: std.mem.Allocator, font_manager: *FontManager) !Self {
     return .{
-        .text_pass = try TextPass.init(alloc),
+        .text_pass = try TextPass.init(alloc, font_manager),
         .text_buffer = std.ArrayList(TextPass.Text).init(alloc),
         .rect_pass = RectPass.init(),
         .rect_buffer = std.ArrayList(geo.Rect).init(alloc),
