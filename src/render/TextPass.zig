@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("mach-core");
+const core = @import("mach").core;
 const gpu = core.gpu;
 const freetype = @import("mach-freetype");
 const harfbuzz = @import("mach-harfbuzz");

@@ -1,20 +1,24 @@
 const std = @import("std");
-const mach_core = @import("mach_core");
+const mach = @import("mach");
 const mach_freetype = @import("mach_freetype");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mach_core_dep = b.dependency("mach_core", .{
+    const mach_dep = b.dependency("mach", .{
         .target = target,
         .optimize = optimize,
+
+        // Since we're only using @import("mach").core, we can specify this to avoid
+        // pulling in unneccessary dependencies.
+        .core = true,
     });
     const mach_freetype_dep = b.dependency("mach_freetype", .{
         .target = target,
         .optimize = optimize,
     });
-    const app = try mach_core.App.init(b, mach_core_dep.builder, .{
+    const app = try mach.CoreApp.init(b, mach_dep.builder, .{
         .name = "silk",
         .src = "src/main.zig",
         .target = target,
